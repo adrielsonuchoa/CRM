@@ -3,6 +3,8 @@ import { leads } from '@/db/schema';
 import { PipelineBoard } from '@/components/pipeline/pipeline-board';
 import { desc, notInArray } from 'drizzle-orm';
 
+export const dynamic = 'force-dynamic';
+
 export default async function PipelinePage() {
   const allLeads = await db.select().from(leads).where(notInArray(leads.pipelineStage, ['PERDIDO', 'NÃO CONTATAR'])).orderBy(desc(leads.leadScore));
 

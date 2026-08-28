@@ -1,11 +1,16 @@
 import { db } from '@/db';
 import { leads } from '@/db/schema';
-import { inArray, desc } from 'drizzle-orm';
+import { and, desc, inArray, ne } from 'drizzle-orm';
 import { ProspectingQueue } from './prospecting-queue';
+
+export const dynamic = 'force-dynamic';
 
 export default async function ProspectingPage() {
   const queueLeads = await db.select().from(leads)
-    .where(inArray(leads.pipelineStage, ['NOVO', 'PESQUISANDO', 'QUALIFICADO', 'PRONTO PARA CONTATO']))
+    .where(and(
+      ne(leads.source, 'TEST_FIXTURE'),
+      inArray(leads.pipelineStage, ['DESCOBERTO', 'ANALISANDO', 'QUALIFICADO', 'AGUARDANDO_CONTATO', 'NOVO', 'PESQUISANDO', 'PRONTO PARA CONTATO'])
+    ))
     .orderBy(desc(leads.leadScore))
     .limit(10);
 

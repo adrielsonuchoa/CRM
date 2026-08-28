@@ -7,6 +7,8 @@ export const metadata = {
   title: 'Leads | Sirrus CRM',
 };
 
+export const dynamic = 'force-dynamic';
+
 export default async function LeadsPage() {
   const allLeads = await db.select().from(leads).orderBy(desc(leads.createdAt));
 

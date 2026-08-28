@@ -15,6 +15,34 @@
       "when": 1787891379545,
       "tag": "0001_tense_sunspot",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787902380000,
+      "tag": "0002_real_crm_readiness",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787929000000,
+      "tag": "0003_multi_prospecting_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787929100000,
+      "tag": "0004_generic_place_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787929200000,
+      "tag": "0005_geoapify_default_source",
+      "breakpoints": true
     }
   ]
 }

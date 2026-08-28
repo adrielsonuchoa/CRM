@@ -1,51 +1,60 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { db } from '@/db';
-import { leads, activities } from '@/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { activities, leads, settings, webhookEvents } from '@/db/schema';
+import { eq } from 'drizzle-orm';
 import { sendInstagramMessageViaApi } from '@/lib/meta-api';
 import OpenAI from 'openai';
 
 function getOpenAI() {
-  if (!process.env.OPENAI_API_KEY) return null;
-  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return null;
+  return new OpenAI({
+    apiKey,
+    baseURL: process.env.OPENAI_BASE_URL || (apiKey.startsWith('gsk_') ? 'https://api.groq.com/openai/v1' : undefined),
+  });
 }
 
-// GET: Verification endpoint for Meta Webhook
+function getAiModel() {
+  return process.env.OPENAI_MODEL || (process.env.OPENAI_API_KEY?.trim().startsWith('gsk_') ? 'openai/gpt-oss-20b' : 'gpt-4o-mini');
+}
+
+function safeEqual(a: string, b: string) {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const mode = searchParams.get('hub.mode');
   const token = searchParams.get('hub.verify_token');
   const challenge = searchParams.get('hub.challenge');
-
   const expectedVerifyToken = process.env.META_WEBHOOK_VERIFY_TOKEN?.trim();
 
   if (mode === 'subscribe' && token && expectedVerifyToken && token === expectedVerifyToken) {
-    console.log('Webhook Meta verificado com sucesso.');
+    console.log('[META] Webhook verificado');
     return new NextResponse(challenge, { status: 200 });
   }
 
-  return NextResponse.json({ error: 'Token de verificação inválido.' }, { status: 403 });
+  return NextResponse.json({ error: 'Token de verificacao invalido.' }, { status: 403 });
 }
 
-// POST: Message receiver webhook
 export async function POST(req: NextRequest) {
   try {
-    const appSecret = process.env.META_APP_SECRET?.trim();
     const rawBody = await req.text();
+    const appSecret = process.env.META_APP_SECRET?.trim();
 
-    // Verify signature if app secret is provided
     if (appSecret) {
       const signature = req.headers.get('x-hub-signature-256');
-      if (signature) {
-        const expectedSignature = 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
-        if (signature !== expectedSignature) {
-          return NextResponse.json({ error: 'Assinatura inválida' }, { status: 401 });
-        }
+      const expectedSignature = `sha256=${crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex')}`;
+      if (!signature || !safeEqual(signature, expectedSignature)) {
+        return NextResponse.json({ error: 'Assinatura invalida' }, { status: 401 });
       }
     }
 
     const payload = JSON.parse(rawBody);
+    console.log('[META] Evento recebido');
 
     if (payload.object === 'instagram' || payload.object === 'page') {
       for (const entry of payload.entry || []) {
@@ -54,9 +63,14 @@ export async function POST(req: NextRequest) {
           const senderId = event.sender?.id || event.value?.from?.id;
           const senderUsername = event.sender?.username || event.value?.from?.username;
           const messageText = event.message?.text || event.value?.message;
+          const eventId =
+            event.message?.mid ||
+            event.value?.message_id ||
+            event.value?.id ||
+            `${entry.id ?? 'entry'}:${senderId ?? senderUsername}:${crypto.createHash('sha256').update(JSON.stringify(event)).digest('hex')}`;
 
           if (messageText && (senderId || senderUsername)) {
-            await handleInboundMessage(senderId, senderUsername, messageText);
+            await handleInboundMessage(senderId, senderUsername, messageText, eventId);
           }
         }
       }
@@ -64,13 +78,30 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ status: 'EVENT_RECEIVED' }, { status: 200 });
   } catch (error: any) {
-    console.error('Erro no processamento do webhook Meta:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error('[ERROR] Erro no processamento do webhook Meta:', error?.message ?? error);
+    return NextResponse.json({ error: 'Falha ao processar webhook.' }, { status: 500 });
   }
 }
 
-async function handleInboundMessage(senderId: string, senderUsername: string | undefined, messageText: string) {
-  // Find lead by metaPsid or instagramUsername
+async function rememberWebhookEvent(eventId: string, payloadHash: string, leadId?: string) {
+  await db.insert(webhookEvents).values({
+    id: crypto.randomUUID(),
+    provider: 'META',
+    eventId,
+    leadId,
+    payloadHash,
+    processedAt: new Date(),
+  });
+}
+
+async function handleInboundMessage(senderId: string, senderUsername: string | undefined, messageText: string, eventId: string) {
+  const payloadHash = crypto.createHash('sha256').update(`${eventId}:${senderId}:${senderUsername}:${messageText}`).digest('hex');
+  const duplicate = await db.select({ id: webhookEvents.id }).from(webhookEvents).where(eq(webhookEvents.eventId, eventId)).limit(1);
+  if (duplicate.length > 0) {
+    console.log('[META] Evento duplicado ignorado');
+    return;
+  }
+
   let existingLead = null;
 
   if (senderId) {
@@ -85,26 +116,22 @@ async function handleInboundMessage(senderId: string, senderUsername: string | u
   }
 
   if (!existingLead) {
-    console.log(`Lead não localizado no banco para mensagem recebida de ID=${senderId}, Username=${senderUsername}`);
+    console.log('[META] Lead nao localizado para mensagem recebida');
+    await rememberWebhookEvent(eventId, payloadHash);
     return;
   }
 
   const leadId = existingLead.id;
   const now = new Date();
 
-  // 1. Update lead: set conversationProvider to META_API, update metaPsid and pipeline stage
-  await db
-    .update(leads)
-    .set({
-      metaPsid: senderId || existingLead.metaPsid,
-      conversationProvider: 'META_API',
-      pipelineStage: existingLead.pipelineStage === 'CONTATO REALIZADO' ? 'RESPONDEU' : existingLead.pipelineStage,
-      lastContactAt: now,
-      updatedAt: now,
-    })
-    .where(eq(leads.id, leadId));
+  await db.update(leads).set({
+    metaPsid: senderId || existingLead.metaPsid,
+    conversationProvider: 'META_API',
+    pipelineStage: existingLead.pipelineStage === 'CONTATO REALIZADO' ? 'RESPONDEU' : existingLead.pipelineStage,
+    lastContactAt: now,
+    updatedAt: now,
+  }).where(eq(leads.id, leadId));
 
-  // 2. Record MESSAGE_RECEIVED activity
   await db.insert(activities).values({
     id: crypto.randomUUID(),
     leadId,
@@ -112,34 +139,51 @@ async function handleInboundMessage(senderId: string, senderUsername: string | u
     channel: 'INSTAGRAM',
     direction: 'INBOUND',
     content: messageText,
-    metadata: JSON.stringify({ senderId, senderUsername, provider: 'META_API' }),
+    metadata: JSON.stringify({ senderId, senderUsername, provider: 'META_API', eventId }),
     createdAt: now,
   });
+  console.log('[META] Mensagem recebida');
 
-  // 3. Classify intention & suggest reply using OpenAI
-  const openai = getOpenAI();
   let suggestedReply = '';
-
+  const openai = getOpenAI();
   if (openai) {
     try {
-      const prompt = `O lead "${existingLead.businessName}" respondeu à prospecção com a mensagem: "${messageText}".
-Você é um especialista comercial da Sirrus em Maceió.
-Gere uma resposta curta (2-3 frases), cordial, tirando dúvidas e convidando para uma demonstração do sistema para restaurante.`;
-
       const aiRes = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
+        model: getAiModel(),
+        reasoning_effort: 'low',
+        messages: [
+          {
+            role: 'system',
+            content: 'Voce escreve respostas comerciais curtas para a Sirrus. Use apenas a mensagem recebida e dados do lead; nao invente informacoes.',
+          },
+          {
+            role: 'user',
+            content: `Lead: ${existingLead.businessName}\nMensagem recebida: ${messageText}\nGere uma resposta sugerida curta, cordial e revisavel pelo usuario antes do envio.`,
+          },
+        ],
         max_tokens: 200,
       });
-
       suggestedReply = aiRes.choices[0].message.content || '';
-    } catch (err) {
-      console.error('Erro ao gerar resposta com IA:', err);
+    } catch (err: any) {
+      console.error('[ERROR] Erro ao gerar resposta sugerida:', err?.message ?? err);
     }
   }
 
-  // 4. Auto Reply if AUTO_REPLY=true and not DO_NOT_CONTACT
-  const autoReply = process.env.AUTO_REPLY === 'true';
+  if (suggestedReply) {
+    await db.insert(activities).values({
+      id: crypto.randomUUID(),
+      leadId,
+      type: 'MESSAGE_GENERATED',
+      channel: 'INSTAGRAM',
+      direction: 'OUTBOUND',
+      content: suggestedReply,
+      metadata: JSON.stringify({ provider: 'META_API', suggestedReply: true, autoSent: false, eventId }),
+      createdAt: new Date(),
+    });
+  }
+
+  const config = (await db.select().from(settings).limit(1))[0];
+  const autoReply = (config?.autoReplyEnabled ?? false) && process.env.AUTO_REPLY === 'true';
   if (autoReply && !existingLead.doNotContact && senderId && suggestedReply) {
     const sendRes = await sendInstagramMessageViaApi(senderId, suggestedReply);
     if (sendRes.success) {
@@ -150,9 +194,11 @@ Gere uma resposta curta (2-3 frases), cordial, tirando dúvidas e convidando par
         channel: 'INSTAGRAM',
         direction: 'OUTBOUND',
         content: suggestedReply,
-        metadata: JSON.stringify({ provider: 'META_API', autoReply: true }),
+        metadata: JSON.stringify({ provider: 'META_API', autoReply: true, eventId }),
         createdAt: new Date(),
       });
     }
   }
+
+  await rememberWebhookEvent(eventId, payloadHash, leadId);
 }

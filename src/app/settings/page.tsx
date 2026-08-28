@@ -9,6 +9,8 @@ export const metadata = {
   description: 'Configure o perfil do representante, automação de Instagram e integrações Meta API.',
 };
 
+export const dynamic = 'force-dynamic';
+
 export default async function SettingsPage() {
   const result = await db.select().from(settings).limit(1);
   const currentSettings = result[0] ?? null;

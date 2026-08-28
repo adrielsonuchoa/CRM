@@ -4,16 +4,23 @@ import OpenAI from 'openai';
 import { z } from 'zod';
 import { zodResponseFormat } from 'openai/helpers/zod';
 import { db } from '@/db';
-import { leads, activities } from '@/db/schema';
+import { activities, leads, settings } from '@/db/schema';
 import { eq } from 'drizzle-orm';
-import { revalidatePath } from 'next/cache';
 import crypto from 'crypto';
 
 function getOpenAI() {
-  if (!process.env.OPENAI_API_KEY) {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
     throw new Error('OPENAI_API_KEY não configurada. Adicione a chave no arquivo .env para usar funcionalidades de IA.');
   }
-  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return new OpenAI({
+    apiKey,
+    baseURL: process.env.OPENAI_BASE_URL || (apiKey.startsWith('gsk_') ? 'https://api.groq.com/openai/v1' : undefined),
+  });
+}
+
+function getAiModel() {
+  return process.env.OPENAI_MODEL || (process.env.OPENAI_API_KEY?.trim().startsWith('gsk_') ? 'openai/gpt-oss-20b' : 'gpt-4o-mini');
 }
 
 const ScoreSchema = z.object({
@@ -43,14 +50,20 @@ Nome: ${lead.businessName}
 Categoria: ${lead.category ?? 'Não informado'}${lead.subcategory ? ` - ${lead.subcategory}` : ''}
 Instagram: ${lead.instagramUsername ?? 'Não informado'} (${lead.followers ?? 'desconhecido'} seguidores)
 Bairro: ${lead.neighborhood ?? 'Não informado'}
+Cidade/região: ${lead.city ?? 'Não informado'}${lead.state ? ` / ${lead.state}` : ''}
+Endereço: ${lead.address ?? 'Não informado'}
+Website: ${lead.website ?? 'Não informado'}
+Avaliação Google: ${lead.rating ?? 'Não informado'} (${lead.reviewCount ?? 'não informado'} avaliações)
 Delivery: ${lead.hasDelivery ? 'Sim' : lead.hasDelivery === false ? 'Não' : 'Desconhecido'}
 Salão: ${lead.hasDiningRoom ? 'Sim' : lead.hasDiningRoom === false ? 'Não' : 'Desconhecido'}
 Garçons: ${lead.hasWaiters ? 'Sim' : lead.hasWaiters === false ? 'Não' : 'Desconhecido'}
 Múltiplas Unidades: ${lead.hasMultipleUnits ? 'Sim' : 'Não'}
-Notas: ${lead.notes ?? 'Sem notas.'}`;
+Notas: ${lead.notes ?? 'Sem notas.'}
+Informações institucionais da Sirrus: ${((await db.select().from(settings).limit(1))[0]?.institutionalText ?? 'Não configuradas')}`;
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: getAiModel(),
+      reasoning_effort: 'low',
       messages: [
         { role: 'system', content: 'Você é um especialista em vendas da Sirrus, sistemas de gestão para food service. Nunca invente dados não fornecidos. Responda em JSON válido correspondente ao schema do lead.' },
         { role: 'user', content: prompt + '\n\nRetorne a resposta estritamente no formato JSON com as chaves: score (número 0-100), qualification ("ALTA PRIORIDADE" | "BOA OPORTUNIDADE" | "MÉDIA PRIORIDADE" | "BAIXA PRIORIDADE"), reasons (array de strings), possibleNeeds (array de strings: PDV, comandas, mesas, estoque, delivery), confidence (número 0.0-1.0), summary (string).' },
@@ -82,9 +95,6 @@ Notas: ${lead.notes ?? 'Sem notas.'}`;
       createdAt: now,
     });
 
-    revalidatePath('/prospecting');
-    revalidatePath(`/leads/${leadId}`);
-    revalidatePath('/');
     return { success: true, result };
   } catch (error: any) {
     console.error('Error analyzing lead:', error);
@@ -119,6 +129,11 @@ Características: ${[
       lead.hasWaiters ? 'tem garçons' : null,
       lead.followers ? `${lead.followers} seguidores no Instagram` : null,
     ].filter(Boolean).join(', ') || 'não informadas'}
+Presença digital: Instagram ativo = ${lead.instagramActive == null ? 'desconhecido' : lead.instagramActive ? 'sim' : 'não'}; website = ${lead.website ?? 'não informado'}
+Reputação: avaliação ${lead.rating ?? 'não informada'} com ${lead.reviewCount ?? 'número de'} avaliações
+Operação: sistema atual = ${lead.currentSystem ?? 'não informado'}; porte estimado = ${lead.estimatedSize ?? 'não informado'}; complexidade = ${lead.estimatedOperationComplexity ?? 'não informada'}
+Localização: ${lead.address ?? 'endereço não informado'}, ${lead.neighborhood ?? lead.city ?? 'região não informada'}
+Necessidades e observações já registradas: ${lead.painPoints ?? 'nenhuma'}; ${lead.notes ?? 'nenhuma'}
 
 Estratégia: ${strategy}
 Como aplicar: ${guide}
@@ -135,7 +150,8 @@ REGRAS OBRIGATÓRIAS:
 9. Escreva em português informal mas profissional.`;
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: getAiModel(),
+      reasoning_effort: 'low',
       messages: [
         { role: 'system', content: 'Você é um representante comercial local que escreve mensagens naturais, diretas e não corporativas.' },
         { role: 'user', content: prompt },
@@ -157,7 +173,6 @@ REGRAS OBRIGATÓRIAS:
       createdAt: new Date(),
     });
 
-    revalidatePath(`/leads/${leadId}`);
     return { success: true, message };
   } catch (error: any) {
     console.error('Error generating message:', error);

@@ -6,6 +6,9 @@ import {
   pauseWorker,
   checkChromeConnection,
   sendFirstDmViaBrowser,
+  enrichLeadViaBrowser,
+  testWorkerReadiness,
+  getRecentWorkerActivities,
 } from '@/lib/browser-worker';
 import { testMetaConnection, getMetaApiStatusConfig } from '@/lib/meta-api';
 import { revalidatePath } from 'next/cache';
@@ -19,25 +22,44 @@ export async function fetchWorkerStatusAction() {
   }
 }
 
+export async function fetchWorkerLogAction() {
+  try {
+    return { success: true, logs: await getRecentWorkerActivities() };
+  } catch (error: any) {
+    return { success: false, logs: [], error: error.message };
+  }
+}
+
 export async function startWorkerAction() {
-  const result = startWorker();
+  const result = await startWorker();
   revalidatePath('/settings');
+  revalidatePath('/prospecting');
+  revalidatePath('/leads');
   return result;
 }
 
 export async function pauseWorkerAction() {
-  const result = pauseWorker();
+  const result = await pauseWorker();
   revalidatePath('/settings');
   return result;
 }
 
 export async function testChromeConnectionAction() {
-  const result = await checkChromeConnection(true);
+  const readiness = await testWorkerReadiness();
+  const result = await checkChromeConnection();
+  return { ...result, readiness };
+}
+
+export async function enrichLeadAction(leadId: string) {
+  const result = await enrichLeadViaBrowser(leadId);
+  revalidatePath('/prospecting');
+  revalidatePath('/leads');
+  revalidatePath(`/leads/${leadId}`);
   return result;
 }
 
-export async function sendFirstDmAction(leadId: string) {
-  const result = await sendFirstDmViaBrowser(leadId);
+export async function sendFirstDmAction(leadId: string, message?: string) {
+  const result = await sendFirstDmViaBrowser(leadId, message);
   revalidatePath('/prospecting');
   revalidatePath('/leads');
   revalidatePath(`/leads/${leadId}`);

@@ -6,6 +6,7 @@ import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import crypto from 'crypto';
 import { z } from 'zod';
+import { importManualLeadsCsv } from '@/lib/prospecting-sources';
 
 const SettingsSchema = z.object({
   name: z.string().trim().optional(),
@@ -13,7 +14,7 @@ const SettingsSchema = z.object({
   instagram: z.string().trim().optional(),
   whatsapp: z.string().trim().optional(),
   phone: z.string().trim().optional(),
-  email: z.string().trim().email('E-mail inválido').optional().or(z.literal('')),
+  email: z.string().trim().email('E-mail invalido').optional().or(z.literal('')),
   city: z.string().trim().optional(),
   territory: z.string().trim().optional(),
   representedCompany: z.string().trim().optional(),
@@ -23,14 +24,38 @@ const SettingsSchema = z.object({
   aiMessageModel: z.string().trim().optional(),
   dailyQueueSize: z.coerce.number().int().min(1).max(50).optional(),
   minScoreForQueue: z.coerce.number().int().min(0).max(100).optional(),
+  prospectingCities: z.string().trim().optional(),
+  prospectingSegments: z.string().trim().optional(),
+  prospectingSearchTerms: z.string().trim().optional(),
+  prospectingSources: z.string().trim().optional(),
+  maxProfilesPerRun: z.coerce.number().int().min(1).max(200).optional(),
+  maxApprovedLeadsPerDay: z.coerce.number().int().min(1).max(100).optional(),
+  minActionIntervalSeconds: z.coerce.number().int().min(15).max(3600).optional(),
+  ignorePrivateProfiles: z.coerce.boolean().optional(),
+  ignoreAlreadyAnalyzed: z.coerce.boolean().optional(),
+  ignoreExistingLeads: z.coerce.boolean().optional(),
+  ignoreAlreadyContacted: z.coerce.boolean().optional(),
+  ignoreDuplicates: z.coerce.boolean().optional(),
+  prospectionDryRun: z.coerce.boolean().optional(),
+  autoReplyEnabled: z.coerce.boolean().optional(),
   followUpDays: z.coerce.number().int().min(1).max(30).optional(),
   maxFollowUps: z.coerce.number().int().min(0).max(10).optional(),
-  operationalMode: z.enum(['ASSISTIDO', 'SEMIAUTOMÁTICO']).optional(),
+  operationalMode: z.enum(['ASSISTIDO', 'SEMIAUTOMATICO']).optional(),
 });
+
+function listToJson(value: string | undefined) {
+  const items = (value ?? '')
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return JSON.stringify(Array.from(new Set(items)));
+}
 
 export async function saveSettingsAction(formData: FormData) {
   try {
-    const raw = Object.fromEntries(formData.entries());
+    const raw = Object.fromEntries(formData.entries()) as Record<string, FormDataEntryValue>;
+    raw.prospectingSources = formData.getAll('prospectingSources').map(String).join(',');
+    delete raw.manualLeadCsv;
     const parsed = SettingsSchema.safeParse(raw);
 
     if (!parsed.success) {
@@ -38,7 +63,22 @@ export async function saveSettingsAction(formData: FormData) {
       return { success: false, error: `${firstError.path.join('.')}: ${firstError.message}` };
     }
 
-    const data = parsed.data;
+    const data = {
+      ...parsed.data,
+      prospectingCities: listToJson(parsed.data.prospectingCities),
+      prospectingSegments: listToJson(parsed.data.prospectingSegments),
+      prospectingSearchTerms: listToJson(parsed.data.prospectingSearchTerms),
+      prospectingSources: listToJson(parsed.data.prospectingSources),
+      ignorePrivateProfiles: parsed.data.ignorePrivateProfiles ?? false,
+      ignoreAlreadyAnalyzed: parsed.data.ignoreAlreadyAnalyzed ?? false,
+      ignoreExistingLeads: parsed.data.ignoreExistingLeads ?? false,
+      ignoreAlreadyContacted: parsed.data.ignoreAlreadyContacted ?? false,
+      ignoreDuplicates: parsed.data.ignoreDuplicates ?? false,
+      prospectionDryRun: parsed.data.prospectionDryRun ?? false,
+      autoReplyEnabled: parsed.data.autoReplyEnabled ?? false,
+      operationalMode: parsed.data.operationalMode ?? 'ASSISTIDO',
+    };
+
     const existing = await db.select().from(settings).limit(1);
 
     if (existing.length > 0) {
@@ -47,10 +87,18 @@ export async function saveSettingsAction(formData: FormData) {
       await db.insert(settings).values({ id: crypto.randomUUID(), ...data });
     }
 
+    const csv = formData.get('manualLeadCsv');
+    if (csv instanceof File && csv.size > 0) {
+      const csvResult = await importManualLeadsCsv(await csv.text());
+      if (csvResult.errors.length > 0 && csvResult.created === 0) {
+        return { success: false, error: csvResult.errors[0] };
+      }
+    }
+
     revalidatePath('/settings');
     return { success: true };
   } catch (error: any) {
     console.error('Error saving settings:', error);
-    return { success: false, error: 'Não foi possível salvar as configurações.' };
+    return { success: false, error: 'Nao foi possivel salvar as configuracoes.' };
   }
 }

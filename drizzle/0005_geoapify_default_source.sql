@@ -1,0 +1,1 @@
+UPDATE `settings` SET `prospecting_sources` = '["GEOAPIFY"]' WHERE `prospecting_sources` IS NULL OR `prospecting_sources` = '' OR `prospecting_sources` = '["GOOGLE_PLACES"]';

@@ -137,10 +137,13 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     if (isAutoSending) return;
     clearError();
     setIsAutoSending(true);
-    const res = await sendFirstDmAction(currentLead.id);
+    const res = await sendFirstDmAction(currentLead.id, message.trim() || undefined);
     setIsAutoSending(false);
     if (res.success) {
       setMessage('');
+      if (res.dryRun) {
+        setError('MODO DE TESTE ativo: mensagem gerada e registrada, mas nenhum envio real foi feito.');
+      }
       setCurrentIndex(prev => prev + 1);
     } else {
       setError(res.error || 'Falha ao enviar DM via automação.');
@@ -338,17 +341,19 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
             <Button
               size="sm"
               onClick={handleAutoSend}
-              disabled={isAutoSending || !normalizedInstagram}
+              disabled={isAutoSending}
               variant="outline"
               className="border-blue-500 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/30"
-              title="Enviar primeira DM de forma automatizada via Playwright"
+              title={normalizedInstagram
+                ? 'Enviar primeira DM de forma automatizada via Playwright'
+                : 'Localizar o Instagram do lead e preparar o envio automatizado'}
             >
               {isAutoSending ? (
                 <RefreshCw className="w-4 h-4 mr-1.5 animate-spin" />
               ) : (
                 <Bot className="w-4 h-4 mr-1.5" />
               )}
-              {isAutoSending ? 'Enviando...' : 'Enviar DM (Automação)'}
+              {isAutoSending ? 'Processando...' : normalizedInstagram ? 'Enviar DM (Automação)' : 'Buscar Instagram e enviar'}
             </Button>
 
             <Button

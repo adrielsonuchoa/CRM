@@ -4,10 +4,14 @@ import { leads, demos } from '@/db/schema';
 import { count, sql } from 'drizzle-orm';
 import { Store, MessagesSquare, CheckCircle2, TrendingUp, CalendarCheck, Users } from 'lucide-react';
 import Link from 'next/link';
+import { getRecentWorkerActivities, getWorkerStatus } from '@/lib/browser-worker';
+import { DashboardWorkerStatus } from './dashboard-worker-status';
 
 export const metadata = {
   title: 'Dashboard | Sirrus CRM',
 };
+
+export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
   const [
@@ -18,6 +22,9 @@ export default async function DashboardPage() {
     interestedResult,
     clientResult,
     demosResult,
+    foundTodayResult,
+    workerStatus,
+    workerLogs,
   ] = await Promise.all([
     db.select({ count: count() }).from(leads),
     db.select({ count: count() }).from(leads).where(
@@ -34,6 +41,9 @@ export default async function DashboardPage() {
     ),
     db.select({ count: count() }).from(leads).where(sql`${leads.pipelineStage} = 'CLIENTE'`),
     db.select({ count: count() }).from(demos),
+    db.select({ count: count() }).from(leads).where(sql`${leads.createdAt} >= ${new Date(new Date().setHours(0, 0, 0, 0))}`),
+    getWorkerStatus(),
+    getRecentWorkerActivities(),
   ]);
 
   const total = totalResult[0].count;
@@ -43,6 +53,7 @@ export default async function DashboardPage() {
   const interested = interestedResult[0].count;
   const clients = clientResult[0].count;
   const demosCount = demosResult[0].count;
+  const foundToday = foundTodayResult[0].count;
 
   const responseRate = contacted > 0 ? ((responded / contacted) * 100).toFixed(1) : '—';
 
@@ -65,7 +76,7 @@ export default async function DashboardPage() {
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         {[
-          { label: 'Total Leads', value: total, icon: Store, color: 'text-neutral-500', href: '/leads' },
+          { label: 'Hoje', value: foundToday, icon: Store, color: 'text-neutral-500', href: '/leads' },
           { label: 'Qualificados', value: qualified, icon: CheckCircle2, color: 'text-blue-500', href: '/leads' },
           { label: 'Abordados', value: contacted, icon: MessagesSquare, color: 'text-blue-600', href: '/pipeline' },
           { label: 'Responderam', value: responded, icon: Users, color: 'text-indigo-600', href: '/pipeline' },
@@ -153,6 +164,8 @@ export default async function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      <DashboardWorkerStatus initialStatus={workerStatus} initialLogs={workerLogs} />
     </div>
   );
 }
