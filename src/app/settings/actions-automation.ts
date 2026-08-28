@@ -32,7 +32,7 @@ export async function pauseWorkerAction() {
 }
 
 export async function testChromeConnectionAction() {
-  const result = await checkChromeConnection();
+  const result = await checkChromeConnection(true);
   return result;
 }
 

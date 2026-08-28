@@ -43,23 +43,48 @@ export function getDailyLimit(): number {
   return envVal ? parseInt(envVal, 10) || 5 : 5;
 }
 
-export async function checkChromeConnection(): Promise<{
+import { exec } from 'child_process';
+
+async function tryAutoLaunchChrome(cdpUrl: string): Promise<boolean> {
+  try {
+    if (process.platform === 'win32') {
+      exec('start chrome.exe --remote-debugging-port=9222');
+    } else if (process.platform === 'darwin') {
+      exec('/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222 &');
+    } else {
+      exec('google-chrome --remote-debugging-port=9222 &');
+    }
+    await new Promise((r) => setTimeout(r, 2500));
+    const browser = await chromium.connectOverCDP(cdpUrl);
+    await browser.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function checkChromeConnection(autoLaunch = false): Promise<{
   connected: boolean;
   username: string | null;
   error?: string;
 }> {
-  const cdpUrl = process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const cdpUrl = process.env.CHROME_CDP_URL || 'http://127.0.0.1:9222';
   try {
     const browser = await chromium.connectOverCDP(cdpUrl);
-    const contexts = browser.contexts();
     const username = process.env.INSTAGRAM_USERNAME || 'Autenticado';
     await browser.close();
     return { connected: true, username };
   } catch (err: any) {
+    if (autoLaunch) {
+      const launched = await tryAutoLaunchChrome(cdpUrl);
+      if (launched) {
+        return { connected: true, username: process.env.INSTAGRAM_USERNAME || 'Autenticado' };
+      }
+    }
     return {
       connected: false,
       username: null,
-      error: `Não foi possível conectar ao Chrome no CDP (${cdpUrl}): ${err.message || 'Porta fechada ou Chrome indisponível'}.`,
+      error: `Chrome (CDP) não está rodando em ${cdpUrl}. Tentamos abrir automaticamente. Se não abriu, inicie com: chrome.exe --remote-debugging-port=9222. (Na Vercel/Produção, utilize a integração oficial Meta API).`,
     };
   }
 }
@@ -147,7 +172,7 @@ export async function sendFirstDmViaBrowser(leadId: string): Promise<{ success: 
     messageToSend = genResult.message;
   }
 
-  const cdpUrl = process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const cdpUrl = process.env.CHROME_CDP_URL || 'http://127.0.0.1:9222';
   let browser;
 
   try {
