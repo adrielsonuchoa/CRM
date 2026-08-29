@@ -32,6 +32,51 @@ const ScoreSchema = z.object({
   summary: z.string().describe('Resumo factual do estabelecimento, separando fatos de inferências'),
 });
 
+function extractJsonObject(content: string) {
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+
+  const firstBrace = trimmed.indexOf('{');
+  const lastBrace = trimmed.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+
+  return JSON.parse(trimmed);
+}
+
+function normalizeLeadAnalysisPayload(raw: unknown) {
+  const source = (typeof raw === 'object' && raw ? raw as Record<string, unknown> : {}) as Record<string, unknown>;
+  const payload = (source.result && typeof source.result === 'object' ? source.result as Record<string, unknown> : source) as Record<string, unknown>;
+
+  const reasons = Array.isArray(payload.reasons)
+    ? payload.reasons.map((item) => typeof item === 'string' ? item : String(item)).filter(Boolean)
+    : [];
+
+  const possibleNeeds = Array.isArray(payload.possibleNeeds)
+    ? payload.possibleNeeds.map((item) => typeof item === 'string' ? item : String(item)).filter(Boolean)
+    : [];
+
+  const qualification = typeof payload.qualification === 'string' && ['ALTA PRIORIDADE', 'BOA OPORTUNIDADE', 'MÉDIA PRIORIDADE', 'BAIXA PRIORIDADE'].includes(payload.qualification)
+    ? payload.qualification
+    : 'MÉDIA PRIORIDADE';
+
+  const score = Number(payload.score ?? 0);
+  const confidence = Number(payload.confidence ?? (score >= 70 ? 0.8 : score >= 40 ? 0.6 : 0.4));
+  const summary = typeof payload.summary === 'string' && payload.summary.trim()
+    ? payload.summary.trim()
+    : 'Resumo da IA indisponível; avaliação baseada nos dados do lead.';
+
+  return {
+    score: Number.isFinite(score) ? score : 0,
+    qualification,
+    reasons: reasons.length ? reasons : ['Dados limitados para uma avaliação detalhada.'],
+    possibleNeeds: possibleNeeds.length ? possibleNeeds : ['PDV'],
+    confidence: Number.isFinite(confidence) ? confidence : 0.5,
+    summary,
+  };
+}
+
 export async function analyzeLeadAction(leadId: string) {
   try {
     const openai = getOpenAI();
@@ -73,7 +118,25 @@ Informações institucionais da Sirrus: ${((await db.select().from(settings).lim
 
     const rawContent = response.choices[0].message.content;
     if (!rawContent) throw new Error('Falha ao obter resposta da IA.');
-    const result = ScoreSchema.parse(JSON.parse(rawContent));
+
+    let parsed: unknown;
+    try {
+      parsed = extractJsonObject(rawContent);
+    } catch {
+      const fallback = rawContent.match(/\{[\s\S]*\}/)?.[0];
+      if (!fallback) throw new Error('Resposta da IA não está em JSON válido.');
+      parsed = extractJsonObject(fallback);
+    }
+
+    const normalized = normalizeLeadAnalysisPayload(parsed);
+    const result = ScoreSchema.parse({
+      score: Math.min(100, Math.max(0, normalized.score)),
+      qualification: normalized.qualification,
+      reasons: normalized.reasons,
+      possibleNeeds: normalized.possibleNeeds,
+      confidence: Math.min(1, Math.max(0, normalized.confidence)),
+      summary: normalized.summary,
+    });
 
     const now = new Date();
     await db.update(leads)
@@ -179,3 +242,92 @@ REGRAS OBRIGATÓRIAS:
     return { success: false, error: error.message };
   }
 }
+
+export async function disambiguateInstagramCandidates(
+  lead: {
+    businessName: string;
+    city: string | null;
+    neighborhood: string | null;
+    category: string | null;
+    phone: string | null;
+    website: string | null;
+  },
+  candidates: Array<{
+    username: string;
+    displayName: string | null;
+    bio: string | null;
+    category: string | null;
+    followers: number | null;
+    postsCount: number | null;
+    website: string | null;
+    phone: string | null;
+    score: number;
+  }>
+): Promise<{ matched: boolean; username: string | null; confidence: number; reason: string }> {
+  try {
+    const openai = getOpenAI();
+    const prompt = `Decida qual perfil do Instagram (se houver) corresponde exatamente ao seguinte estabelecimento procurado.
+
+Estabelecimento Procurado:
+- Nome Comercial: ${lead.businessName}
+- Cidade/Região: ${lead.city ?? 'Não informado'} (${lead.neighborhood ?? ''})
+- Categoria/Ramo: ${lead.category ?? 'Alimentação'}
+- Telefone Esperado: ${lead.phone ?? 'Não informado'}
+- Website Esperado: ${lead.website ?? 'Não informado'}
+
+Candidatos Encontrados:
+${candidates.map((c, i) => `
+Candidato ${i + 1}:
+- @username: ${c.username}
+- Nome de exibição: ${c.displayName ?? 'Não informado'}
+- Bio: ${c.bio ?? 'Sem bio'}
+- Categoria comercial: ${c.category ?? 'Não informado'}
+- Seguidores: ${c.followers ?? 'Desconhecido'}
+- Publicações: ${c.postsCount ?? 'Desconhecido'}
+- Site na bio: ${c.website ?? 'Não informado'}
+- Telefone na bio: ${c.phone ?? 'Não informado'}
+- Score de afinidade local: ${c.score}
+`).join('\n')}
+
+Regras de Decisão:
+1. Compare os dados do estabelecimento com os perfis candidatos.
+2. Se algum candidato for uma correspondência real e inequívoca do estabelecimento (com base em similaridade de nome, ramo de atuação e localização geográfica compatível), selecione-o.
+3. Fique extremamente atento a falsos positivos (ex: franquias em outras cidades, lojas de outro segmento com o mesmo nome, perfis pessoais ou de fã, etc. Se a cidade ou segmento forem incompatíveis, NÃO selecione o candidato).
+4. Se nenhum candidato for uma correspondência confiável ou se houver dúvida razoável, prefira declarar matched como false em vez de tentar escolher o candidato menos ruim.
+5. Se houver apenas 1 candidato, verifique se ele possui evidências suficientes (por exemplo, nome coerente mais localização ou segmento compatíveis) e NÃO assuma que ele está correto apenas por ser o único.
+
+Retorne estritamente um JSON no seguinte formato:
+{
+  "matched": true | false,
+  "username": "username_selecionado_ou_null",
+  "confidence": 92, // confiança de 0 a 100
+  "reason": "breve justificativa da escolha ou rejeição"
+}`;
+
+    const response = await openai.chat.completions.create({
+      model: getAiModel(),
+      messages: [
+        { role: 'system', content: 'Você é um assistente analista de dados especializado em validação de leads no CRM. Seja extremamente rigoroso para evitar falsos positivos.' },
+        { role: 'user', content: prompt }
+      ],
+      response_format: { type: 'json_object' }
+    });
+
+    const rawContent = response.choices[0].message.content;
+    if (!rawContent) {
+      return { matched: false, username: null, confidence: 0, reason: 'insufficient_evidence' };
+    }
+
+    const parsed = JSON.parse(rawContent);
+    return {
+      matched: !!parsed.matched && parsed.username !== null,
+      username: parsed.username || null,
+      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
+      reason: parsed.reason || 'insufficient_evidence'
+    };
+  } catch (error: any) {
+    console.error('Error in disambiguateInstagramCandidates:', error);
+    return { matched: false, username: null, confidence: 0, reason: 'error_occurred' };
+  }
+}
+

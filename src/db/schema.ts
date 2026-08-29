@@ -20,6 +20,12 @@ export const leads = sqliteTable('leads', {
   category: text('category'),
   subcategory: text('subcategory'),
   followers: integer('followers'),
+  profileScore: real('profile_score'),
+  profileAccepted: integer('profile_accepted', { mode: 'boolean' }),
+  keywordHits: integer('keyword_hits'),
+  profileSnippet: text('profile_snippet'),
+  postsCount: integer('posts_count'),
+  profileDiagnostics: text('profile_diagnostics'), // JSON string with detailed diagnostics
   rating: real('rating'),
   reviewCount: integer('review_count'),
   instagramActive: integer('instagram_active', { mode: 'boolean' }),

@@ -32,6 +32,7 @@ export async function fetchWorkerLogAction() {
 
 export async function startWorkerAction() {
   const result = await startWorker();
+  revalidatePath('/');
   revalidatePath('/settings');
   revalidatePath('/prospecting');
   revalidatePath('/leads');
@@ -40,6 +41,7 @@ export async function startWorkerAction() {
 
 export async function pauseWorkerAction() {
   const result = await pauseWorker();
+  revalidatePath('/');
   revalidatePath('/settings');
   return result;
 }

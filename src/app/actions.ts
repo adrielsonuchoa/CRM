@@ -138,3 +138,19 @@ export async function addLeadNote(leadId: string, note: string) {
     return { success: false, error: 'Falha ao salvar nota.' };
   }
 }
+
+export async function clearAllLeadsAction() {
+  try {
+    await db.delete(activities);
+    await db.delete(leads);
+    revalidatePath('/prospecting');
+    revalidatePath('/pipeline');
+    revalidatePath('/leads');
+    revalidatePath('/');
+    return { success: true };
+  } catch (error: any) {
+    console.error('Error clearing leads:', error);
+    return { success: false, error: error?.message || 'Failed to clear leads' };
+  }
+}
+

@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { Bot, Circle } from 'lucide-react';
+import { Bot, Circle, Play, Square } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import type { WorkerLogEntry, WorkerStatus } from '@/lib/browser-worker';
-import { fetchWorkerLogAction, fetchWorkerStatusAction } from './settings/actions-automation';
+import { fetchWorkerLogAction, fetchWorkerStatusAction, pauseWorkerAction, startWorkerAction } from './settings/actions-automation';
 
 const activityLabels: Record<string, string> = {
   LEAD_CREATED: 'Lead encontrado',
@@ -17,8 +18,35 @@ const activityLabels: Record<string, string> = {
 
 export function DashboardWorkerStatus({ initialStatus, initialLogs }: { initialStatus: WorkerStatus; initialLogs: WorkerLogEntry[] }) {
   const router = useRouter();
+  const [isPending, setIsPending] = useState(false);
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>(initialStatus);
   const [logs, setLogs] = useState<WorkerLogEntry[]>(initialLogs);
+
+  const canRunWorker = workerStatus.status === 'ATIVO' || workerStatus.status === 'PROCESSANDO' || workerStatus.status === 'AGUARDANDO';
+
+  const handleToggleWorker = async () => {
+    setIsPending(true);
+    try {
+      const result = canRunWorker
+        ? await pauseWorkerAction()
+        : await startWorkerAction();
+
+      if (!result.success) {
+        return;
+      }
+
+      const nextStatus = await fetchWorkerStatusAction();
+      if (nextStatus.success && nextStatus.status) {
+        setWorkerStatus(nextStatus.status);
+      }
+
+      const logResult = await fetchWorkerLogAction();
+      if (logResult.success) setLogs(logResult.logs);
+      router.refresh();
+    } finally {
+      setIsPending(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -43,10 +71,23 @@ export function DashboardWorkerStatus({ initialStatus, initialLogs }: { initialS
   return (
     <Card className="lg:col-span-3">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Bot className="w-5 h-5" />
-          Worker e Limite Diario
-        </CardTitle>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <CardTitle className="flex items-center gap-2">
+            <Bot className="w-5 h-5" />
+            Worker e Limite Diario
+          </CardTitle>
+          <Button
+            type="button"
+            variant={canRunWorker ? 'outline' : 'default'}
+            size="sm"
+            className="gap-2"
+            onClick={handleToggleWorker}
+            disabled={isPending}
+          >
+            {canRunWorker ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+            {canRunWorker ? 'Parar IA' : 'Iniciar IA'}
+          </Button>
+        </div>
         <CardDescription>Status operacional atualizado automaticamente</CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">

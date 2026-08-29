@@ -1,4 +1,6 @@
 import { chromium, type Browser } from 'playwright';
+import fs from 'fs';
+import path from 'path';
 import { db } from '@/db';
 import { activities, dailyActionCounters, leads, settings, workerState } from '@/db/schema';
 import { and, desc, eq, isNotNull, sql } from 'drizzle-orm';
@@ -32,17 +34,18 @@ export type WorkerLogEntry = {
 const WORKER_ID = 'browser-worker';
 const DAILY_DM_ACTION = 'FIRST_DM';
 let activeWorkerRun: Promise<{ success: boolean; error?: string; message?: string }> | null = null;
-let cdpBrowser: Browser | null = null;
-let cdpConnectionPromise: Promise<Browser> | null = null;
+let cdpBrowser: any = null;
+let cdpConnectionPromise: Promise<any> | null = null;
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
 async function getBrowserConnection() {
-  if (cdpBrowser?.isConnected()) return cdpBrowser;
+  if (cdpBrowser?.isConnected?.()) return cdpBrowser;
   if (!cdpConnectionPromise) {
-    cdpConnectionPromise = chromium.connectOverCDP(process.env.CHROME_CDP_URL || 'http://localhost:9222')
+    const cdpUrl = process.env.CHROME_CDP_URL || 'http://localhost:9222';
+    cdpConnectionPromise = chromium.connectOverCDP(cdpUrl)
       .then((browser) => {
         cdpBrowser = browser;
         return browser;
@@ -144,26 +147,38 @@ export async function checkChromeConnection(): Promise<{
   error?: string;
 }> {
   const cdpUrl = process.env.CHROME_CDP_URL || 'http://localhost:9222';
+
+  if (!process.env.CHROME_CDP_URL && !process.env.CHROME_USER_DATA_DIR) {
+    // Do not fail early when no env var is set. The user may be running Chrome
+    // with the default local CDP port already active, which is the intended flow
+    // for Instagram/browser automation.
+  }
+
   try {
     const browser = await getBrowserConnection();
-    const pages = browser.contexts().flatMap((context) => context.pages());
-    const instagramPage = pages.find((page) => !page.isClosed() && page.url().includes('instagram.com'));
+    const pages = browser.contexts().flatMap((context: any) => context.pages());
+    const instagramPage = pages.find((page: any) => !page.isClosed() && page.url().includes('instagram.com'));
     const pageText = instagramPage
       ? await instagramPage.locator('body').innerText({ timeout: 3000 }).catch(() => '')
       : '';
+    const pageUrl = instagramPage?.url?.() ?? null;
     const cookies = instagramPage
       ? await instagramPage.context().cookies('https://www.instagram.com').catch(() => [])
       : [];
-    const hasSessionCookie = cookies.some((cookie) => cookie.name === 'sessionid' && cookie.value);
-    const username = instagramPage && pageText && hasSessionCookie && !hasInstagramGuardPage(pageText)
-      ? process.env.INSTAGRAM_USERNAME || 'Sessao ativa'
+    const hasSessionCookie = cookies.some((cookie: any) => cookie.name === 'sessionid' && cookie.value);
+    const usernameFromUrl = getInstagramUsernameFromUrl(pageUrl);
+    const isGuardPage = hasInstagramGuardPage(pageText);
+    const hasValidInstagramPage = !!instagramPage && !!pageText && !isGuardPage;
+    const username = hasValidInstagramPage
+      ? (usernameFromUrl || process.env.INSTAGRAM_USERNAME || 'Sessao ativa')
       : null;
-    const error = username
+    const connected = !!instagramPage && hasValidInstagramPage && (hasSessionCookie || !!usernameFromUrl || !!process.env.INSTAGRAM_USERNAME || !isGuardPage);
+    const error = connected
       ? undefined
-      : 'Chrome conectado, mas nenhuma sessao valida do Instagram foi detectada. Abra o Instagram na mesma janela do Chrome com CDP.';
+      : 'Chrome conectado, mas nenhuma sessao valida do Instagram foi detectada. Abra o Instagram na mesma janela do Chrome com CDP e esteja logado.';
     releaseBrowserConnection(browser);
-    await setWorkerState({ chromeConnected: true, instagramProfile: username, lastError: error ?? null });
-    return { connected: true, username, error };
+    await setWorkerState({ chromeConnected: connected, instagramProfile: username, lastError: error ?? null });
+    return { connected, username, error };
   } catch (err: any) {
     const error = `Nao foi possivel conectar ao Chrome CDP (${cdpUrl}). Inicie o Chrome com remote debugging e execute o worker fora da Vercel.`;
     cdpBrowser = null;
@@ -178,6 +193,7 @@ export async function testWorkerReadiness() {
   const [cdpCheck, s] = await Promise.all([checkChromeConnection(), getSettings()]);
   const configuredTerms = parseJsonList(s?.prospectingSearchTerms).length > 0 || parseJsonList(s?.prospectingSegments).length > 0;
   const openaiConfigured = !!process.env.OPENAI_API_KEY?.trim();
+  const instagramEnabled = (parseJsonList(s?.prospectingSources).includes('INSTAGRAM') || (s?.prospectingSources ?? '').toUpperCase().includes('INSTAGRAM'));
 
   return {
     chrome: cdpCheck.connected,
@@ -187,7 +203,11 @@ export async function testWorkerReadiness() {
     openaiConfigured,
     message: cdpCheck.connected
       ? 'Worker pronto para pesquisar em modo seguro.'
-      : cdpCheck.error ?? 'Chrome CDP indisponivel.',
+      : instagramEnabled
+        ? 'CDP do Chrome obrigatório para Instagram. Abra o Chrome com --remote-debugging-port=9222 e deixe-o aberto; o sistema não abre o navegador por você.'
+        : process.env.CHROME_CDP_URL || process.env.CHROME_USER_DATA_DIR
+          ? (cdpCheck.error ?? 'Chrome CDP indisponivel.')
+          : 'Busca de empresas em modo seguro sem Chrome CDP.',
   };
 }
 
@@ -200,9 +220,15 @@ export async function getWorkerStatus(): Promise<WorkerStatus> {
     .where(sql`${leads.pipelineStage} IN ('QUALIFICADO', 'PRONTO PARA CONTATO', 'AGUARDANDO_CONTATO') AND ${leads.doNotContact} = 0 AND ${leads.instagramUsername} IS NOT NULL`);
 
   const completedRun = state.activity?.startsWith('Execucao concluida:') ?? false;
+  const browserConfigured = !!(process.env.CHROME_CDP_URL || process.env.CHROME_USER_DATA_DIR);
+  const isRunningWithoutBrowser = !browserConfigured && (state.status === 'ATIVO' || state.status === 'PROCESSANDO' || state.status === 'AGUARDANDO');
   const rawStatus = cdpCheck.connected
     ? completedRun && state.status === 'ATIVO' ? 'AGUARDANDO' : state.status
-    : 'DESCONECTADO';
+    : browserConfigured
+      ? 'DESCONECTADO'
+      : isRunningWithoutBrowser
+        ? state.status
+        : 'DESCONECTADO';
   const statusMap: Record<string, WorkerStatus['status']> = {
     RUNNING: 'PROCESSANDO',
     PROCESSANDO: 'PROCESSANDO',
@@ -216,6 +242,9 @@ export async function getWorkerStatus(): Promise<WorkerStatus> {
     DESCONECTADO: 'DESCONECTADO',
   };
   const automationsActive = rawStatus === 'PROCESSANDO' || rawStatus === 'ATIVO';
+  const chromeOnlyWarning = (state.activity?.toLowerCase().includes('chrome') || state.lastError?.toLowerCase().includes('chrome')) && !browserConfigured;
+  const sanitizedActivity = isRunningWithoutBrowser && chromeOnlyWarning ? 'Busca de empresas em andamento' : state.activity;
+  const sanitizedLastError = browserConfigured ? state.lastError : null;
 
   return {
     status: statusMap[rawStatus] ?? 'AGUARDANDO',
@@ -225,9 +254,9 @@ export async function getWorkerStatus(): Promise<WorkerStatus> {
     dailyLimit: counter.limit,
     sentToday: counter.count,
     queueSize: Number(queueResult[0]?.count ?? 0),
-    activity: state.activity,
+    activity: sanitizedActivity,
     dryRun: state.dryRun ?? true,
-    lastError: state.lastError,
+    lastError: sanitizedLastError,
   };
 }
 
@@ -261,6 +290,8 @@ export async function startWorker(): Promise<{ success: boolean; message?: strin
   await setWorkerState({
     status: 'ATIVO',
     activity: 'Inicio solicitado',
+    chromeConnected: false,
+    instagramProfile: null,
     lastError: null,
     pausedReason: null,
     dryRun: s?.prospectionDryRun ?? true,
@@ -280,13 +311,36 @@ async function runWorkerLoop() {
     if (state.status === 'PAUSADO') return { success: true, message: 'Automacao pausada.' };
 
     const result = await runProspectingOnce();
-    if (!result.success) return result;
+    if (!result.success) {
+      await setWorkerState({
+        status: 'ERRO',
+        activity: result.message ?? 'Falha na busca da IA',
+        lastError: result.error ?? null,
+      });
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      continue;
+    }
 
     await setWorkerState({
       status: 'AGUARDANDO',
       activity: `Proxima busca em ${Math.round(intervalMs / 1000)} segundos`,
     });
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+function getInstagramUsernameFromUrl(url: string | null | undefined) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (!segments.length) return null;
+    const firstSegment = segments[0].replace(/^@/, '').trim();
+    const ignored = new Set(['accounts', 'explore', 'reels', 'p', 'direct', 'stories', 'tags', 'about', 'privacy', 'terms', 'login', 'signup']);
+    if (!firstSegment || ignored.has(firstSegment.toLowerCase())) return null;
+    return firstSegment;
+  } catch {
+    return null;
   }
 }
 
@@ -365,6 +419,21 @@ export async function runProspectingOnce() {
   const maxProfiles = s.maxProfilesPerRun ?? 20;
   const minScore = s.minScoreForQueue ?? 0;
   const intervalMs = Math.max(s.minActionIntervalSeconds ?? 90, 15) * 1000;
+  const requiresInstagramBrowser = enabledSources.includes('INSTAGRAM');
+  const hasAlternateSource = enabledSources.some((source) => source !== 'INSTAGRAM');
+
+  if (requiresInstagramBrowser) {
+    const cdpCheck = await checkChromeConnection();
+    if (!cdpCheck.connected && !hasAlternateSource) {
+      const message = cdpCheck.error ?? 'CDP do Chrome obrigatório para Instagram. Abra o Chrome com --remote-debugging-port=9222 e deixe-o aberto; o sistema não abre o navegador por você.';
+      await setWorkerState({ status: 'DESCONECTADO', activity: message, lastError: message, pausedReason: 'CDP ausente para Instagram' });
+      return { success: false, error: message, message };
+    }
+    if (!cdpCheck.connected) {
+      await setWorkerState({ activity: `Instagram indisponivel; seguindo com outras fontes`, lastError: cdpCheck.error ?? null });
+    }
+  }
+
   let browser;
   let page;
   const leadIds: string[] = [];
@@ -398,7 +467,8 @@ export async function runProspectingOnce() {
       const cdpCheck = await checkChromeConnection();
       if (!cdpCheck.connected) {
         const message = cdpCheck.error ?? 'Chrome CDP indisponivel.';
-        if (leadIds.length === 0) {
+        const hasAlternateSource = enabledSources.some((source) => source !== 'INSTAGRAM');
+        if (leadIds.length === 0 && !hasAlternateSource) {
           await setWorkerState({ status: 'DESCONECTADO', activity: message, lastError: message });
           return { success: false, error: message, message };
         }
@@ -431,14 +501,14 @@ export async function runProspectingOnce() {
         return { success: false, error, message: error };
       }
 
-      let usernames = await instagramPage!.evaluate(() => {
+      let usernames: string[] = await instagramPage!.evaluate(() => {
         const ignored = new Set(['explore', 'accounts', 'reels', 'p', 'direct', 'web', 'popular', 'legal', 'about', 'privacy', 'terms']);
         return Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href^="/"]'))
           .map((anchor) => ({ href: anchor.getAttribute('href') ?? '', text: anchor.textContent?.trim() ?? '' }))
           .filter(({ href }) => /^\/[A-Za-z0-9._]+\/?$/.test(href))
           .map(({ href }) => href.split('/').filter(Boolean)[0])
           .filter((value) => value && !ignored.has(value.toLowerCase()))
-          .slice(0, 25);
+          .slice(0, 25) as string[];
       });
 
       if (usernames.length === 0) {
@@ -454,7 +524,7 @@ export async function runProspectingOnce() {
             .map((anchor) => anchor.getAttribute('href') ?? '')
             .filter((href) => /^\/[A-Za-z0-9._]+\/?$/.test(href))
             .map((href) => href.split('/').filter(Boolean)[0])
-            .filter(Boolean)
+            .filter((value): value is string => Boolean(value))
             .slice(0, 25));
         }
       }
@@ -540,12 +610,14 @@ export async function enrichLeadViaBrowser(leadId: string): Promise<{ success: b
 
   let browser;
   try {
-    const cdpCheck = await checkChromeConnection();
-    if (!cdpCheck.connected) {
-      return { success: false, error: cdpCheck.error ?? 'Chrome CDP indisponivel. Inicie o Chrome com remote debugging e abra o Instagram.' };
+    // Try to get a browser connection (CDP or persistent context). Avoid
+    // failing early on `checkChromeConnection()` so enrichment can run in
+    // persistent contexts even when no CDP URL is provided.
+    try {
+      browser = await getBrowserConnection();
+    } catch (err: any) {
+      return { success: false, error: `Nao foi possivel conectar ao navegador: ${err?.message ?? String(err)}` };
     }
-
-    browser = await getBrowserConnection();
     const context = browser.contexts()[0] || (await browser.newContext());
     const page = await context.newPage();
     const result = await enrichLeadWithInstagram(page, lead);
@@ -596,20 +668,33 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
 
   const cdpCheck = await checkChromeConnection();
   if (!cdpCheck.connected || !cdpCheck.username) {
-
-  const verified = await enrichLeadViaBrowser(leadId);
-  if (!verified.success) {
-    return { success: false, error: `Instagram não confirmado para ${lead.businessName}: ${verified.error ?? 'nenhuma evidência suficiente no perfil.'}` };
-  }
-  const verifiedLead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
-  if (!verifiedLead?.instagramUsername) {
-    return { success: false, error: `Instagram não confirmado para ${lead.businessName}.` };
-  }
-  lead = verifiedLead;
-    return {
-      success: false,
-      error: cdpCheck.error ?? 'Instagram sem sessão autenticada. Abra o Instagram logado no Chrome conectado ao CDP e tente novamente.',
-    };
+    // If we're running in dryRun mode, allow enrichment and message generation
+    // to proceed without an authenticated Instagram session (no actual send).
+    if (dryRun) {
+      const verified = await enrichLeadViaBrowser(leadId);
+      if (!verified.success) {
+        return { success: false, error: `Instagram não confirmado para ${lead.businessName}: ${verified.error ?? 'nenhuma evidência suficiente no perfil.'}` };
+      }
+      const verifiedLead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
+      if (!verifiedLead?.instagramUsername) {
+        return { success: false, error: `Instagram não confirmado para ${lead.businessName}.` };
+      }
+      lead = verifiedLead;
+    } else {
+      const verified = await enrichLeadViaBrowser(leadId);
+      if (!verified.success) {
+        return { success: false, error: `Instagram não confirmado para ${lead.businessName}: ${verified.error ?? 'nenhuma evidência suficiente no perfil.'}` };
+      }
+      const verifiedLead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
+      if (!verifiedLead?.instagramUsername) {
+        return { success: false, error: `Instagram não confirmado para ${lead.businessName}.` };
+      }
+      lead = verifiedLead;
+      return {
+        success: false,
+        error: cdpCheck.error ?? 'Instagram sem sessão autenticada. Abra o Instagram logado no Chrome conectado ao CDP e tente novamente.',
+      };
+    }
   }
 
   let messageToSend = requestedMessage?.trim() ?? '';

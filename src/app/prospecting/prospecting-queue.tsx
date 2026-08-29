@@ -14,7 +14,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { analyzeLeadAction, generateMessageAction } from '@/app/actions/ai';
-import { markMessageSent, doNotContactLead } from '@/app/actions';
+import { markMessageSent, doNotContactLead, clearAllLeadsAction } from '@/app/actions';
 import { sendFirstDmAction } from '@/app/settings/actions-automation';
 import {
   BrainCircuit, MessageSquareText, ExternalLink, CheckCircle,
@@ -50,28 +50,25 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showDoNotContactDialog, setShowDoNotContactDialog] = useState(false);
+  const [isAutoSending, setIsAutoSending] = useState(false);
 
   const clearError = () => setError(null);
 
-  if (leads.length === 0 || currentIndex >= leads.length) {
-    return (
-      <div className="flex flex-col items-center justify-center h-64 text-neutral-500 border-2 border-dashed rounded-xl bg-neutral-50 dark:bg-neutral-900/50">
-        <CheckCircle className="w-14 h-14 mb-4 text-green-500" />
-        <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-50">Fila concluída!</h2>
-        <p className="mt-1">Nenhum lead prioritário restante na fila de hoje.</p>
-      </div>
-    );
-  }
-
-  const currentLead = leads[currentIndex];
-  let painPoints: string[] = [];
-  try {
-    if (currentLead.painPoints) painPoints = JSON.parse(currentLead.painPoints);
-  } catch {}
-
-  const normalizedInstagram = currentLead.instagramUsername?.replace(/^@/, '') ?? null;
+  const handleClearAll = async () => {
+    if (!window.confirm("Deseja realmente limpar todos os leads e atividades do banco?")) return;
+    const res = await clearAllLeadsAction();
+    if (res.success) {
+      setLeads([]);
+      setCurrentIndex(0);
+      setError(null);
+      return;
+    }
+    setError(res.error || "Falha ao limpar registros.");
+  };
 
   const handleAnalyze = async () => {
+    if (leads.length === 0 || currentIndex >= leads.length) return;
+    const currentLead = leads[currentIndex];
     if (isAnalyzing) return;
     clearError();
     setIsAnalyzing(true);
@@ -93,6 +90,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   };
 
   const handleGenerateMessage = async () => {
+    if (leads.length === 0 || currentIndex >= leads.length) return;
+    const currentLead = leads[currentIndex];
     if (isGenerating) return;
     clearError();
     setIsGenerating(true);
@@ -113,6 +112,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   }, [message]);
 
   const handleMarkAsSent = async () => {
+    if (leads.length === 0 || currentIndex >= leads.length) return;
+    const currentLead = leads[currentIndex];
     if (!message.trim() || isSending) return;
     setIsSending(true);
     const res = await markMessageSent(currentLead.id, message);
@@ -131,9 +132,9 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setCurrentIndex(prev => prev + 1);
   };
 
-  const [isAutoSending, setIsAutoSending] = useState(false);
-
   const handleAutoSend = async () => {
+    if (leads.length === 0 || currentIndex >= leads.length) return;
+    const currentLead = leads[currentIndex];
     if (isAutoSending) return;
     clearError();
     setIsAutoSending(true);
@@ -151,6 +152,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   };
 
   const handleConfirmDoNotContact = async () => {
+    if (leads.length === 0 || currentIndex >= leads.length) return;
+    const currentLead = leads[currentIndex];
     setShowDoNotContactDialog(false);
     const res = await doNotContactLead(currentLead.id);
     if (res.success) {
@@ -161,8 +164,35 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     }
   };
 
+  // Compute derived values before any conditional return
+  const isEmpty = leads.length === 0 || currentIndex >= leads.length;
+  const currentLead = isEmpty ? null : leads[currentIndex];
+  let painPoints: string[] = [];
+  try {
+    if (currentLead?.painPoints) painPoints = JSON.parse(currentLead.painPoints);
+  } catch {}
+  const normalizedInstagram = currentLead?.instagramUsername?.replace(/^@/, '') ?? null;
+
+  if (isEmpty) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 text-neutral-500 border-2 border-dashed rounded-xl bg-neutral-50 dark:bg-neutral-900/50 space-y-4">
+        <CheckCircle className="w-14 h-14 text-green-500" />
+        <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-50">Fila concluída!</h2>
+        <p className="mt-1">Nenhum lead prioritário restante na fila de hoje.</p>
+        <Button variant="destructive" size="sm" onClick={handleClearAll}>
+          Limpar Todos os Leads
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-4xl mx-auto space-y-4">
+      <div className="flex justify-end">
+        <Button variant="destructive" size="sm" onClick={handleClearAll}>
+          Limpar Todos os Leads
+        </Button>
+      </div>
       {/* Error banner */}
       {error && (
         <div className="flex items-start gap-3 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-300 rounded-lg p-4 text-sm">
@@ -177,17 +207,17 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
           <div className="flex justify-between items-start gap-4">
             <div className="flex-1 min-w-0">
               <CardTitle className="text-2xl font-bold flex flex-wrap items-center gap-2">
-                <span className="truncate">{currentLead.businessName}</span>
-                {currentLead.instagramActive && (
+                <span className="truncate">{currentLead!.businessName}</span>
+                {currentLead!.instagramActive && (
                   <Badge className="bg-gradient-to-r from-pink-600 to-purple-600 text-white border-0 shrink-0">
                     Instagram Ativo
                   </Badge>
                 )}
               </CardTitle>
               <div className="flex flex-wrap gap-3 mt-2 text-sm text-neutral-500">
-                <span>📍 {currentLead.neighborhood ?? 'Bairro não informado'}</span>
+                <span>📍 {currentLead!.neighborhood ?? 'Bairro não informado'}</span>
                 <span>•</span>
-                <span>👥 {currentLead.followers?.toLocaleString('pt-BR') ?? 0} seguidores</span>
+                <span>👥 {currentLead!.followers?.toLocaleString('pt-BR') ?? 0} seguidores</span>
                 {normalizedInstagram && (
                   <>
                     <span>•</span>
@@ -198,8 +228,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
             </div>
 
             <div className="text-right shrink-0">
-              <div className={`text-4xl font-black ${currentLead.leadScore != null && currentLead.leadScore >= 80 ? 'text-blue-600' : currentLead.leadScore != null && currentLead.leadScore >= 60 ? 'text-green-600' : 'text-neutral-400'}`}>
-                {currentLead.leadScore ?? '—'}
+              <div className={`text-4xl font-black ${currentLead!.leadScore != null && currentLead!.leadScore >= 80 ? 'text-blue-600' : currentLead!.leadScore != null && currentLead!.leadScore >= 60 ? 'text-green-600' : 'text-neutral-400'}`}>
+                {currentLead!.leadScore ?? '—'}
               </div>
               <div className="text-xs text-neutral-500 uppercase font-bold tracking-wider">Score /100</div>
             </div>
@@ -214,11 +244,11 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               <h3 className="font-semibold text-base border-b border-neutral-200 dark:border-neutral-800 pb-2">Informações</h3>
               <ul className="space-y-2 text-sm">
                 {[
-                  ['Categoria', currentLead.category],
-                  ['Subcategoria', currentLead.subcategory],
-                  ['Delivery', currentLead.hasDelivery ? 'Sim ✓' : currentLead.hasDelivery === false ? 'Não' : '?'],
-                  ['Salão', currentLead.hasDiningRoom ? 'Sim ✓' : currentLead.hasDiningRoom === false ? 'Não' : '?'],
-                  ['Garçons', currentLead.hasWaiters ? 'Sim ✓' : currentLead.hasWaiters === false ? 'Não' : '?'],
+                  ['Categoria', currentLead!.category],
+                  ['Subcategoria', currentLead!.subcategory],
+                  ['Delivery', currentLead!.hasDelivery ? 'Sim ✓' : currentLead!.hasDelivery === false ? 'Não' : '?'],
+                  ['Salão', currentLead!.hasDiningRoom ? 'Sim ✓' : currentLead!.hasDiningRoom === false ? 'Não' : '?'],
+                  ['Garçons', currentLead!.hasWaiters ? 'Sim ✓' : currentLead!.hasWaiters === false ? 'Não' : '?'],
                 ].map(([label, value]) => (
                   <li key={label} className="flex justify-between">
                     <span className="text-neutral-500">{label}</span>
@@ -231,10 +261,10 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
             {/* Right: AI Analysis */}
             <div className="space-y-3">
               <h3 className="font-semibold text-base border-b border-neutral-200 dark:border-neutral-800 pb-2">Análise de IA</h3>
-              {currentLead.qualificationStatus ? (
+              {currentLead!.qualificationStatus ? (
                 <div className="space-y-3">
-                  <Badge variant={currentLead.leadScore != null && currentLead.leadScore > 80 ? 'default' : 'secondary'}>
-                    {currentLead.qualificationStatus}
+                  <Badge variant={currentLead!.leadScore != null && currentLead!.leadScore > 80 ? 'default' : 'secondary'}>
+                    {currentLead!.qualificationStatus}
                   </Badge>
                   {painPoints.length > 0 && (
                     <div>
@@ -298,7 +328,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               className="min-h-[130px] text-base resize-none"
             />
             <p className="text-xs text-neutral-400">
-              💡 Modo Assistido: copie a mensagem, abra o Instagram, envie manualmente e clique em "Marcar como Enviada".
+              💡 Modo Assistido: copie a mensagem, abra o Instagram, envie manualmente e clique em &quot;Marcar como Enviada&quot;.
             </p>
           </div>
         </CardContent>
@@ -382,7 +412,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               Confirmar: Não Contatar
             </DialogTitle>
             <DialogDescription>
-              Tem certeza que deseja marcar <strong>{currentLead.businessName}</strong> como &quot;Não Contatar&quot;?
+              Tem certeza que deseja marcar <strong>{currentLead!.businessName}</strong> como &quot;Não Contatar&quot;?
               <br />Este lead não aparecerá mais na fila de prospecção automaticamente.
             </DialogDescription>
           </DialogHeader>

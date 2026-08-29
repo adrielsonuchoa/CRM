@@ -173,11 +173,18 @@ export function SettingsForm({
       setChromeFeedback(res.username
         ? `Chrome conectado. Sessão Instagram detectada: @${res.username}.`
         : res.error ?? 'Chrome conectado, mas a sessão do Instagram não foi detectada.');
-      setWorkerStatus((prev) => ({ ...prev, chromeConnected: true, instagramProfile: res.username }));
-    } else {
-      setChromeFeedback(res.error || 'Falha ao conectar ao Chrome.');
-      setWorkerStatus((prev) => ({ ...prev, chromeConnected: false, status: 'DESCONECTADO' }));
+      setWorkerStatus((prev) => ({ ...prev, chromeConnected: true, instagramProfile: res.username, status: prev.status === 'PAUSADO' ? 'PAUSADO' : prev.status }));
+      return;
     }
+
+    if (!res.error) {
+      setChromeFeedback('Busca de empresas em modo seguro sem Chrome CDP. O browser só é necessário para Instagram/Browser.');
+      setWorkerStatus((prev) => ({ ...prev, chromeConnected: false, instagramProfile: null }));
+      return;
+    }
+
+    setChromeFeedback(res.error || 'Falha ao conectar ao Chrome.');
+    setWorkerStatus((prev) => ({ ...prev, chromeConnected: false, instagramProfile: null }));
   };
 
   const handleTestMeta = async () => {
@@ -353,7 +360,7 @@ export function SettingsForm({
 
           <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-3 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
             <p className="font-semibold">Validação da sessão</p>
-            <p className="mt-1">Mantenha o Instagram aberto no Chrome iniciado com CDP. O worker reutiliza essa sessão e não fecha o navegador.</p>
+            <p className="mt-1">Quando a fonte Instagram estiver ativa, o CDP precisa estar habilitado e o Chrome precisa ficar aberto com a depuração remota ativa. O sistema não abre o Chrome sozinho toda vez que o app iniciar.</p>
           </div>
 
           {chromeFeedback && (
