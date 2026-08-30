@@ -2,7 +2,17 @@ import assert from 'node:assert/strict';
 import { selectInstagramWinner } from '../src/lib/instagram-enrichment';
 
 const candidateA = {
-  profile: { username: 'sabor_dacentenario', displayName: 'Sabor da Centenário', bio: 'Restaurante e pizzaria em Maceió', category: 'Restaurante', followers: 1200, postsCount: 80 },
+  profile: {
+    username: 'sabor_dacentenario',
+    displayName: 'Sabor da Centenário',
+    bio: 'Restaurante e pizzaria em Maceió',
+    category: 'Restaurante',
+    followers: 1200,
+    postsCount: 80,
+    profileText: 'restaurante e pizzaria em maceio',
+    isPrivate: false,
+    isActive: true,
+  },
   score: 82,
   method: 'instagram_search',
   signals: ['name', 'segment', 'city'],
@@ -10,7 +20,17 @@ const candidateA = {
 };
 
 const candidateB = {
-  profile: { username: 'sabor_da_centenario', displayName: 'Sabor da Centenário', bio: 'Loja de roupas', category: 'Moda', followers: 500, postsCount: 40 },
+  profile: {
+    username: 'sabor_da_centenario',
+    displayName: 'Sabor da Centenário',
+    bio: 'Loja de roupas',
+    category: 'Moda',
+    followers: 500,
+    postsCount: 40,
+    profileText: 'loja de roupas',
+    isPrivate: false,
+    isActive: true,
+  },
   score: 76,
   method: 'instagram_search',
   signals: ['name'],
@@ -18,7 +38,17 @@ const candidateB = {
 };
 
 const candidateC = {
-  profile: { username: 'saborcentenario', displayName: 'Sabor Centenário', bio: 'Pizzaria em Recife', category: 'Pizzaria', followers: 1800, postsCount: 90 },
+  profile: {
+    username: 'saborcentenario',
+    displayName: 'Sabor Centenário',
+    bio: 'Pizzaria em Recife',
+    category: 'Pizzaria',
+    followers: 1800,
+    postsCount: 90,
+    profileText: 'pizzaria em recife',
+    isPrivate: false,
+    isActive: true,
+  },
   score: 74,
   method: 'instagram_search',
   signals: ['name', 'segment'],

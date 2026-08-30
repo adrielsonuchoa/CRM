@@ -15,35 +15,45 @@ import {
   type DragEndEvent,
 } from '@dnd-kit/core';
 import {
-  SortableContext,
   arrayMove,
   sortableKeyboardCoordinates,
 } from '@dnd-kit/sortable';
 import { updateLeadStage } from '@/app/actions';
 import { PipelineColumn } from './pipeline-column';
-import { PipelineCard } from './pipeline-card';
+import { PipelineCard, type PipelineLead } from './pipeline-card';
 
 export const STAGES = [
   'NOVO',
-  'PESQUISANDO',
-  'QUALIFICADO',
   'PRONTO PARA CONTATO',
   'CONTATO REALIZADO',
   'RESPONDEU',
-  'CONVERSANDO',
   'INTERESSADO',
-  'WHATSAPP',
   'DEMONSTRAÇÃO AGENDADA',
-  'DEMONSTRAÇÃO REALIZADA',
   'PROPOSTA',
-  'NEGOCIAÇÃO',
   'CLIENTE',
 ];
 
-type Lead = { id: string; pipelineStage: string; [key: string]: any };
+const DISPLAY_STAGE: Record<string, string> = {
+  DESCOBERTO: 'NOVO',
+  ANALISANDO: 'NOVO',
+  PESQUISANDO: 'NOVO',
+  QUALIFICADO: 'PRONTO PARA CONTATO',
+  AGUARDANDO_CONTATO: 'PRONTO PARA CONTATO',
+  CONVERSANDO: 'RESPONDEU',
+  WHATSAPP: 'INTERESSADO',
+  'DEMONSTRAÇÃO REALIZADA': 'DEMONSTRAÇÃO AGENDADA',
+  NEGOCIAÇÃO: 'PROPOSTA',
+};
 
-export function PipelineBoard({ initialLeads }: { initialLeads: Lead[] }) {
-  const [leads, setLeads] = useState<Lead[]>(initialLeads);
+function getDisplayStage(stage: string) {
+  return DISPLAY_STAGE[stage] ?? stage;
+}
+
+export function PipelineBoard({ initialLeads }: { initialLeads: PipelineLead[] }) {
+  const [leads, setLeads] = useState<PipelineLead[]>(() => initialLeads.map((lead) => ({
+    ...lead,
+    pipelineStage: getDisplayStage(lead.pipelineStage),
+  })));
   const [activeId, setActiveId] = useState<string | null>(null);
   // Track original stage at drag start to detect real changes
   const stageAtDragStart = useRef<string>('');
@@ -102,7 +112,6 @@ export function PipelineBoard({ initialLeads }: { initialLeads: Lead[] }) {
   };
 
   const handleDragEnd = async (event: DragEndEvent) => {
-    const currentActiveId = activeId;
     setActiveId(null);
 
     const { active } = event;

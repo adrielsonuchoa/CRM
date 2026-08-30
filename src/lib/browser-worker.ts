@@ -1,13 +1,13 @@
-import { chromium, type Browser } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { db } from '@/db';
 import { activities, dailyActionCounters, leads, settings, workerState } from '@/db/schema';
-import { and, desc, eq, isNotNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import crypto from 'crypto';
 import { analyzeLeadAction, generateMessageAction } from '@/app/actions/ai';
 import { discoverGeoapifyPlaces } from '@/lib/prospecting-sources';
-import { enrichLeadWithInstagram } from '@/lib/instagram-enrichment';
+import { enrichLeadWithInstagram, searchInstagramUsernames } from '@/lib/instagram-enrichment';
 
 export type WorkerStatus = {
   status: 'ATIVO' | 'PAUSADO' | 'PROCESSANDO' | 'AGUARDANDO' | 'ERRO' | 'DESCONECTADO';
@@ -20,6 +20,8 @@ export type WorkerStatus = {
   activity: string | null;
   dryRun: boolean;
   lastError: string | null;
+  currentLeadName: string | null;
+  previewScreenshot: string | null;
 };
 
 export type WorkerLogEntry = {
@@ -36,24 +38,90 @@ const DAILY_DM_ACTION = 'FIRST_DM';
 let activeWorkerRun: Promise<{ success: boolean; error?: string; message?: string }> | null = null;
 let cdpBrowser: any = null;
 let cdpConnectionPromise: Promise<any> | null = null;
+let currentWorkerLeadName: string | null = null;
+let workerPreviewScreenshot: string | null = null;
+const preparedDmPages = new Map<string, { page: Page; browser: Browser }>();
+
+async function createBackgroundInstagramPage() {
+  const sessionBrowser = await getBrowserConnection();
+  const sessionContext = await ensureBrowserContext(sessionBrowser);
+  const storageState = await sessionContext.storageState();
+  const { executablePath } = getChromeLaunchConfig();
+  const backgroundBrowser = await chromium.launch(executablePath
+    ? { headless: true, executablePath }
+    : { headless: true, channel: 'chrome' });
+  const context = await backgroundBrowser.newContext({
+    storageState,
+    viewport: { width: 1280, height: 900 },
+  });
+  const page = await context.newPage();
+  return { browser: backgroundBrowser, context, page };
+}
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function getChromeLaunchConfig() {
+  const userDataDir = (process.env.CHROME_USER_DATA_DIR || path.join(process.cwd(), '.tmp-chrome-profile')).trim();
+  if (!fs.existsSync(userDataDir)) {
+    fs.mkdirSync(userDataDir, { recursive: true });
+  }
+
+  const executablePath = process.env.CHROME_EXECUTABLE_PATH?.trim() || undefined;
+  return {
+    userDataDir,
+    executablePath,
+  };
+}
+
+async function ensureBrowserContext(browser: Browser | BrowserContext): Promise<BrowserContext> {
+  if ('contexts' in browser && typeof browser.contexts === 'function') {
+    const contexts = browser.contexts();
+    if (contexts.length > 0) return contexts[0];
+    return await browser.newContext();
+  }
+  return browser as BrowserContext;
+}
+
+async function getBrowserPages(browser: Browser | BrowserContext) {
+  if ('contexts' in browser && typeof browser.contexts === 'function') {
+    return browser.contexts().flatMap((context: any) => context.pages());
+  }
+  return (browser as BrowserContext).pages();
+}
+
 async function getBrowserConnection() {
   if (cdpBrowser?.isConnected?.()) return cdpBrowser;
+
+  const preferredCdpUrl = process.env.CHROME_CDP_URL?.trim() || 'http://localhost:9222';
+
   if (!cdpConnectionPromise) {
-    const cdpUrl = process.env.CHROME_CDP_URL || 'http://localhost:9222';
-    cdpConnectionPromise = chromium.connectOverCDP(cdpUrl)
+    cdpConnectionPromise = chromium.connectOverCDP(preferredCdpUrl)
       .then((browser) => {
         cdpBrowser = browser;
         return browser;
+      })
+      .catch(async () => {
+        if (preferredCdpUrl !== 'http://localhost:9222') throw new Error(`CDP unavailable at ${preferredCdpUrl}`);
+
+        const { userDataDir, executablePath } = getChromeLaunchConfig();
+        if (executablePath) {
+          const browserContext = await chromium.launchPersistentContext(userDataDir, {
+            headless: true,
+            executablePath,
+          });
+          cdpBrowser = browserContext as any;
+          return browserContext;
+        }
+
+        throw new Error('Nenhum Chrome real encontrado na porta 9222 nem em um executável configurado.');
       })
       .finally(() => {
         cdpConnectionPromise = null;
       });
   }
+
   return cdpConnectionPromise;
 }
 
@@ -156,35 +224,38 @@ export async function checkChromeConnection(): Promise<{
 
   try {
     const browser = await getBrowserConnection();
-    const pages = browser.contexts().flatMap((context: any) => context.pages());
+    const pages = await getBrowserPages(browser);
     const instagramPage = pages.find((page: any) => !page.isClosed() && page.url().includes('instagram.com'));
+    const context = instagramPage?.context() ?? await ensureBrowserContext(browser);
+
     const pageText = instagramPage
       ? await instagramPage.locator('body').innerText({ timeout: 3000 }).catch(() => '')
       : '';
     const pageUrl = instagramPage?.url?.() ?? null;
-    const cookies = instagramPage
-      ? await instagramPage.context().cookies('https://www.instagram.com').catch(() => [])
-      : [];
+    const cookies = await context.cookies('https://www.instagram.com').catch(() => []);
     const hasSessionCookie = cookies.some((cookie: any) => cookie.name === 'sessionid' && cookie.value);
     const usernameFromUrl = getInstagramUsernameFromUrl(pageUrl);
     const isGuardPage = hasInstagramGuardPage(pageText);
     const hasValidInstagramPage = !!instagramPage && !!pageText && !isGuardPage;
-    const username = hasValidInstagramPage
+    const hasInstagramSession = !!(hasSessionCookie || !!usernameFromUrl || !!process.env.INSTAGRAM_USERNAME);
+    const username = hasInstagramSession
       ? (usernameFromUrl || process.env.INSTAGRAM_USERNAME || 'Sessao ativa')
       : null;
-    const connected = !!instagramPage && hasValidInstagramPage && (hasSessionCookie || !!usernameFromUrl || !!process.env.INSTAGRAM_USERNAME || !isGuardPage);
+    const connected = hasInstagramSession && (!instagramPage || hasValidInstagramPage);
     const error = connected
       ? undefined
-      : 'Chrome conectado, mas nenhuma sessao valida do Instagram foi detectada. Abra o Instagram na mesma janela do Chrome com CDP e esteja logado.';
+      : 'Chrome conectado, mas nenhuma sessao valida do Instagram foi detectada. Abra o Instagram e confirme o login na mesma janela do navegador antes de rodar a busca.';
     releaseBrowserConnection(browser);
     await setWorkerState({ chromeConnected: connected, instagramProfile: username, lastError: error ?? null });
     return { connected, username, error };
   } catch (err: any) {
-    const error = `Nao foi possivel conectar ao Chrome CDP (${cdpUrl}). Inicie o Chrome com remote debugging e execute o worker fora da Vercel.`;
+    const error = process.env.CHROME_CDP_URL?.trim()
+      ? `Nao foi possivel conectar ao Chrome CDP (${cdpUrl}). Inicie o Chrome com remote debugging e execute o worker fora da Vercel.`
+      : 'Nao foi possivel abrir o Chrome localmente para o Instagram. Verifique o caminho do Chrome ou o perfil configurado.';
     cdpBrowser = null;
     cdpConnectionPromise = null;
     await setWorkerState({ chromeConnected: false, lastError: error, status: 'DESCONECTADO' });
-    console.error('[ERROR] CDP desconectado:', err?.message ?? err);
+    console.error('[ERROR] Browser desconectado:', err?.message ?? err);
     return { connected: false, username: null, error };
   }
 }
@@ -257,6 +328,8 @@ export async function getWorkerStatus(): Promise<WorkerStatus> {
     activity: sanitizedActivity,
     dryRun: state.dryRun ?? true,
     lastError: sanitizedLastError,
+    currentLeadName: currentWorkerLeadName,
+    previewScreenshot: workerPreviewScreenshot,
   };
 }
 
@@ -425,8 +498,8 @@ export async function runProspectingOnce() {
   if (requiresInstagramBrowser) {
     const cdpCheck = await checkChromeConnection();
     if (!cdpCheck.connected && !hasAlternateSource) {
-      const message = cdpCheck.error ?? 'CDP do Chrome obrigatório para Instagram. Abra o Chrome com --remote-debugging-port=9222 e deixe-o aberto; o sistema não abre o navegador por você.';
-      await setWorkerState({ status: 'DESCONECTADO', activity: message, lastError: message, pausedReason: 'CDP ausente para Instagram' });
+      const message = cdpCheck.error ?? 'Chrome indisponivel para a busca publica do Instagram. Configure CHROME_EXECUTABLE_PATH ou deixe o Chrome acessivel localmente.';
+      await setWorkerState({ status: 'DESCONECTADO', activity: message, lastError: message, pausedReason: 'Chrome inacessivel para busca' });
       return { success: false, error: message, message };
     }
     if (!cdpCheck.connected) {
@@ -436,6 +509,7 @@ export async function runProspectingOnce() {
 
   let browser;
   let page;
+  let backgroundWorkerBrowser: Browser | undefined;
   const leadIds: string[] = [];
   let discovered = 0;
   let duplicates = 0;
@@ -443,6 +517,8 @@ export async function runProspectingOnce() {
 
   try {
     console.log('[WORKER] Pesquisa iniciada');
+    currentWorkerLeadName = null;
+    workerPreviewScreenshot = null;
     await setWorkerState({ status: 'PROCESSANDO', activity: 'Pesquisa iniciada', lastError: null, dryRun: s.prospectionDryRun ?? true });
     if (enabledSources.includes('GEOAPIFY')) {
       await setWorkerState({ activity: `Buscando empresas via Geoapify em ${cities[0] ?? s.city ?? 'regiao configurada'}` });
@@ -474,9 +550,10 @@ export async function runProspectingOnce() {
         }
         await setWorkerState({ activity: `Instagram indisponivel; seguindo com ${leadIds.length} leads de outras fontes`, lastError: message });
       } else {
-        browser = await getBrowserConnection();
-        const context = browser.contexts()[0] || await browser.newContext();
-        page = await context.newPage();
+        const background = await createBackgroundInstagramPage();
+        backgroundWorkerBrowser = background.browser;
+        browser = background.browser;
+        page = background.page;
       }
     }
 
@@ -486,30 +563,22 @@ export async function runProspectingOnce() {
       if (state.status === 'PAUSADO') break;
       if (discovered >= maxProfiles) break;
 
+      const searchTerms = Array.from(new Set([
+        term,
+        term.replace(/\s+/g, ' '),
+        term.replace(/\s+(de|da|do|dos|das|e|em)\s+/gi, ' '),
+        `${term} maceio`,
+        `${term} alagoas`,
+      ])).filter(Boolean);
+
       await setWorkerState({ activity: `Pesquisando ${term}` });
-      await instagramPage!.goto(`https://www.instagram.com/explore/search/keyword/?q=${encodeURIComponent(term)}`, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-      await instagramPage!.waitForTimeout(3000);
+      let usernames: string[] = [];
 
-      const content = await instagramPage!.locator('body').innerText();
-      if (hasInstagramGuardPage(content)) {
-        const error = 'Instagram solicitou login, captcha ou confirmacao de seguranca. A aba foi mantida aberta para voce validar a conta. Worker pausado.';
-        await setWorkerState({ status: 'PAUSADO', activity: error, lastError: error, pausedReason: 'Protecao do Instagram' });
-        await releaseBrowserConnection(browser);
-        return { success: false, error, message: error };
+      for (const searchTerm of searchTerms) {
+        const candidates = await searchInstagramUsernames(instagramPage!, searchTerm, cities[0] ?? s.city ?? null);
+        usernames.push(...candidates);
+        if (usernames.length >= 10) break;
       }
-
-      let usernames: string[] = await instagramPage!.evaluate(() => {
-        const ignored = new Set(['explore', 'accounts', 'reels', 'p', 'direct', 'web', 'popular', 'legal', 'about', 'privacy', 'terms']);
-        return Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href^="/"]'))
-          .map((anchor) => ({ href: anchor.getAttribute('href') ?? '', text: anchor.textContent?.trim() ?? '' }))
-          .filter(({ href }) => /^\/[A-Za-z0-9._]+\/?$/.test(href))
-          .map(({ href }) => href.split('/').filter(Boolean)[0])
-          .filter((value) => value && !ignored.has(value.toLowerCase()))
-          .slice(0, 25) as string[];
-      });
 
       if (usernames.length === 0) {
         const hashtag = term.replace(/[^a-zA-Z0-9]/g, '');
@@ -520,12 +589,16 @@ export async function runProspectingOnce() {
             timeout: 30000,
           });
           await instagramPage!.waitForTimeout(3000);
-          usernames = await instagramPage!.evaluate(() => Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href^="/"]'))
-            .map((anchor) => anchor.getAttribute('href') ?? '')
-            .filter((href) => /^\/[A-Za-z0-9._]+\/?$/.test(href))
-            .map((href) => href.split('/').filter(Boolean)[0])
-            .filter((value): value is string => Boolean(value))
-            .slice(0, 25));
+          usernames = await instagramPage!.evaluate(() => {
+            const ignored = new Set(['explore', 'accounts', 'reels', 'p', 'direct', 'web', 'popular', 'legal', 'about', 'privacy', 'terms', 'stories', 'saved', 'notifications', 'profile']);
+            return Array.from(new Set(
+              Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href^="/"]'))
+                .map((anchor) => anchor.getAttribute('href') ?? '')
+                .filter((href) => /^\/[A-Za-z0-9._]+\/?$/.test(href))
+                .map((href) => href.split('/').filter(Boolean)[0])
+                .filter((value) => Boolean(value) && !ignored.has(value.toLowerCase()) && /^[A-Za-z0-9._]+$/.test(value))
+            )).slice(0, 25);
+          });
         }
       }
 
@@ -548,13 +621,33 @@ export async function runProspectingOnce() {
       }
     }
 
+    // Backfill profiles created by earlier public-search runs. Those records
+    // already contain the handle, but were never scraped by the old flow.
+    const incompleteInstagramLeads = enabledSources.includes('INSTAGRAM')
+      ? await db
+          .select({ id: leads.id })
+          .from(leads)
+          .where(and(
+            eq(leads.source, 'INSTAGRAM_CDP'),
+            isNotNull(leads.instagramUsername),
+            sql`${leads.profileAccepted} IS NOT 1`,
+          ))
+          .orderBy(desc(leads.createdAt))
+          .limit(maxProfiles)
+      : [];
+
+    for (const incompleteLead of incompleteInstagramLeads) {
+      if (!leadIds.includes(incompleteLead.id)) leadIds.push(incompleteLead.id);
+    }
+
     let enrichmentPage = instagramPage;
     if (!enrichmentPage && leadIds.some(Boolean)) {
       const cdpCheck = await checkChromeConnection();
       if (cdpCheck.connected) {
-        browser = browser ?? await getBrowserConnection();
-        const context = browser.contexts()[0] || await browser.newContext();
-        enrichmentPage = await context.newPage();
+        const background = await createBackgroundInstagramPage();
+        backgroundWorkerBrowser = background.browser;
+        browser = background.browser;
+        enrichmentPage = background.page;
       }
     }
 
@@ -563,13 +656,20 @@ export async function runProspectingOnce() {
       if (state.status === 'PAUSADO') break;
       const lead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
       if (!lead) continue;
+      currentWorkerLeadName = lead.businessName;
 
-      if (enrichmentPage && !lead.instagramUsername) {
-        await setWorkerState({ activity: `Buscando Instagram de ${lead.businessName}` });
+      // Leads discovered by the public Instagram search already have a username.
+      // They still need to be opened and scraped so the CRM fields are populated.
+      if (enrichmentPage) {
+        await setWorkerState({ activity: `Enriquecendo dados de ${lead.businessName}` });
         try {
           const enriched = await enrichLeadWithInstagram(enrichmentPage, lead);
           if (enriched.updated) {
             await setWorkerState({ activity: `@${enriched.profile?.username} encontrado para ${lead.businessName}` });
+          }
+          if (!enrichmentPage.isClosed()) {
+            const preview = await enrichmentPage.screenshot({ type: 'jpeg', quality: 35, fullPage: false });
+            workerPreviewScreenshot = `data:image/jpeg;base64,${preview.toString('base64')}`;
           }
         } catch (err: any) {
           console.warn('[WORKER] Enrichment failed:', err?.message);
@@ -580,22 +680,31 @@ export async function runProspectingOnce() {
       await setWorkerState({ activity: `Analisando ${lead.businessName}` });
       const analysis = await analyzeLeadAction(leadId);
       if (analysis.success && typeof analysis.result?.score === 'number' && analysis.result.score >= minScore) {
-        await db.update(leads).set({ pipelineStage: 'QUALIFICADO', updatedAt: new Date() }).where(eq(leads.id, leadId));
+        const preContactStages = ['DESCOBERTO', 'ANALISANDO', 'NOVO', 'PESQUISANDO', 'QUALIFICADO', 'AGUARDANDO_CONTATO', 'PRONTO PARA CONTATO'];
+        if (preContactStages.includes(lead.pipelineStage)) {
+          await db.update(leads).set({ pipelineStage: 'QUALIFICADO', updatedAt: new Date() }).where(and(eq(leads.id, leadId), inArray(leads.pipelineStage, preContactStages)));
+        }
         const messageResult = await generateMessageAction(leadId);
         qualified++;
         await setWorkerState({ activity: `Lead aprovado — score ${analysis.result.score}`, lastError: messageResult.success ? null : messageResult.error });
       } else {
-        await db.update(leads).set({ pipelineStage: 'DESCARTADO', updatedAt: new Date() }).where(eq(leads.id, leadId));
+        const preContactStages = ['DESCOBERTO', 'ANALISANDO', 'NOVO', 'PESQUISANDO', 'QUALIFICADO', 'AGUARDANDO_CONTATO', 'PRONTO PARA CONTATO'];
+        if (preContactStages.includes(lead.pipelineStage)) {
+          await db.update(leads).set({ pipelineStage: 'DESCARTADO', updatedAt: new Date() }).where(and(eq(leads.id, leadId), inArray(leads.pipelineStage, preContactStages)));
+        }
         await setWorkerState({ activity: `${lead.businessName} descartado após análise`, lastError: analysis.error ?? null });
       }
     }
 
     if (instagramPage) await instagramPage.close();
     if (enrichmentPage && enrichmentPage !== instagramPage) await enrichmentPage.close();
+    if (backgroundWorkerBrowser?.isConnected()) await backgroundWorkerBrowser.close();
     await releaseBrowserConnection(browser);
     await setWorkerState({ status: 'AGUARDANDO', activity: `Execucao concluida: ${discovered} encontrados, ${qualified} qualificados` });
+    currentWorkerLeadName = null;
     return { success: true, message: `Execucao concluida: ${discovered} encontrados, ${qualified} qualificados.` };
   } catch (err: any) {
+    if (backgroundWorkerBrowser?.isConnected()) await backgroundWorkerBrowser.close().catch(() => undefined);
     await releaseBrowserConnection(browser);
     const error = `Erro no Browser Worker: ${err?.message ?? 'falha desconhecida'}`;
     await setWorkerState({ status: 'ERRO', activity: 'Erro durante execucao', lastError: error });
@@ -605,42 +714,70 @@ export async function runProspectingOnce() {
 }
 
 export async function enrichLeadViaBrowser(leadId: string): Promise<{ success: boolean; error?: string; username?: string; followers?: number | null; method?: string | null }> {
-  let lead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
+  const lead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
   if (!lead) return { success: false, error: 'Lead nao encontrado.' };
 
-  let browser;
+  let browser: Browser | undefined;
   try {
-    // Try to get a browser connection (CDP or persistent context). Avoid
-    // failing early on `checkChromeConnection()` so enrichment can run in
-    // persistent contexts even when no CDP URL is provided.
     try {
-      browser = await getBrowserConnection();
+      const background = await createBackgroundInstagramPage();
+      browser = background.browser;
+      const result = await enrichLeadWithInstagram(background.page, lead);
+      await background.page.close();
+      await browser.close();
+
+      if (!result.updated || !result.profile) {
+        return { success: false, error: `Nao foi possivel encontrar Instagram para ${lead.businessName}. Tente buscar manualmente ou importar via CSV.` };
+      }
+
+      return {
+        success: true,
+        username: result.profile.username,
+        followers: result.profile.followers,
+        method: result.method,
+      };
     } catch (err: any) {
+      if (browser?.isConnected()) await browser.close().catch(() => undefined);
       return { success: false, error: `Nao foi possivel conectar ao navegador: ${err?.message ?? String(err)}` };
     }
-    const context = browser.contexts()[0] || (await browser.newContext());
-    const page = await context.newPage();
-    const result = await enrichLeadWithInstagram(page, lead);
-    await page.close();
-    releaseBrowserConnection(browser);
-
-    if (!result.updated || !result.profile) {
-      return { success: false, error: `Nao foi possivel encontrar Instagram para ${lead.businessName}. Tente buscar manualmente ou importar via CSV.` };
-    }
-
-    return {
-      success: true,
-      username: result.profile.username,
-      followers: result.profile.followers,
-      method: result.method,
-    };
   } catch (err: any) {
-    releaseBrowserConnection(browser);
+    if (browser?.isConnected()) await browser.close().catch(() => undefined);
     return { success: false, error: err?.message ?? 'Falha ao enriquecer lead.' };
   }
 }
 
-export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: string): Promise<{ success: boolean; error?: string; dryRun?: boolean }> {
+export type DmPreparationResult = {
+  success: boolean;
+  error?: string;
+  dryRun?: boolean;
+  prepared?: boolean;
+  message?: string;
+  screenshot?: string;
+};
+
+export async function previewInstagramProfileViaBrowser(leadId: string): Promise<{ success: boolean; error?: string; screenshot?: string }> {
+  const lead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
+  if (!lead?.instagramUsername) return { success: false, error: 'Este lead não possui Instagram confirmado.' };
+
+  let backgroundBrowser: Browser | undefined;
+  try {
+    const background = await createBackgroundInstagramPage();
+    backgroundBrowser = background.browser;
+    const username = lead.instagramUsername.replace(/^@/, '').trim();
+    await background.page.goto(`https://www.instagram.com/${username}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await background.page.waitForTimeout(2500);
+    const bodyText = await background.page.locator('body').innerText().catch(() => '');
+    if (hasInstagramGuardPage(bodyText)) return { success: false, error: 'O Instagram solicitou login ou verificação da sessão.' };
+    const screenshot = await background.page.screenshot({ type: 'jpeg', quality: 50, fullPage: false });
+    return { success: true, screenshot: `data:image/jpeg;base64,${screenshot.toString('base64')}` };
+  } catch (err: any) {
+    return { success: false, error: `Não foi possível visualizar o perfil: ${err?.message ?? 'falha desconhecida'}` };
+  } finally {
+    if (backgroundBrowser?.isConnected()) await backgroundBrowser.close().catch(() => undefined);
+  }
+}
+
+export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: string): Promise<DmPreparationResult> {
   const s = await getSettings();
   const dryRun = s?.prospectionDryRun ?? process.env.PROSPECTION_DRY_RUN !== 'false';
   const counter = await getCounter();
@@ -734,17 +871,17 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
       createdAt: now,
     });
     await setWorkerState({ activity: 'MODO DE TESTE: envio real bloqueado', dryRun: true });
-    return { success: true, dryRun: true };
+    return { success: true, dryRun: true, prepared: true, message: messageToSend };
   }
 
-  const cdpUrl = process.env.CHROME_CDP_URL || 'http://localhost:9222';
-  let browser;
+  let browser: Browser | undefined;
 
   try {
     await setWorkerState({ status: 'PROCESSANDO', activity: `Enviando DM para @${lead.instagramUsername}` });
-    browser = await getBrowserConnection();
-    const context = browser.contexts()[0] || (await browser.newContext());
-    const page = await context.newPage();
+    const background = await createBackgroundInstagramPage();
+    browser = background.browser;
+    const context = background.context;
+    let page = background.page;
     const cleanUsername = lead.instagramUsername!.replace(/^@/, '').trim();
 
     await page.goto(`https://www.instagram.com/${cleanUsername}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -752,9 +889,9 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
 
     const pageContent = await page.locator('body').innerText();
     if (hasInstagramGuardPage(pageContent)) {
-      const error = `Instagram solicitou verificacao/login em ${cleanUsername}. A aba foi mantida aberta para voce validar a conta. Automacao pausada por seguranca.`;
+      const error = `Instagram solicitou verificação/login em ${cleanUsername}. Confirme a sessão do Instagram e tente novamente.`;
       await setWorkerState({ status: 'PAUSADO', activity: error, lastError: error, pausedReason: 'Protecao do Instagram' });
-      await releaseBrowserConnection(browser);
+      await browser.close();
       return { success: false, error };
     }
 
@@ -765,14 +902,17 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
       'div[role="button"]:has-text("Enviar mensagem")',
       'div[role="button"]:has-text("Mensagem")',
       'div[role="button"]:has-text("Message")',
-      'a[href*="/direct/"]',
     ];
 
     let clicked = false;
     for (const selector of messageButtonSelectors) {
       const btn = page.locator(selector).first();
       if ((await btn.count()) > 0 && (await btn.isVisible())) {
+        const pagesBeforeClick = new Set(context.pages());
         await btn.click();
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const openedPage = context.pages().find((candidate) => !pagesBeforeClick.has(candidate) && !candidate.isClosed());
+        if (openedPage) page = openedPage;
         clicked = true;
         break;
       }
@@ -780,13 +920,18 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
 
     if (!clicked) {
       await page.close();
-      await releaseBrowserConnection(browser);
+      await browser.close();
       const error = `Botao de mensagem nao encontrado para @${cleanUsername}.`;
       await setWorkerState({ status: 'ERRO', activity: error, lastError: error });
       return { success: false, error };
     }
 
-    await page.waitForTimeout(5000);
+    if (page.isClosed()) {
+      const replacement = context.pages().find((candidate) => !candidate.isClosed() && candidate.url().includes('instagram.com'));
+      if (!replacement) throw new Error('A conversa do Instagram foi fechada antes de ser carregada.');
+      page = replacement;
+    }
+    await page.waitForTimeout(3500);
     const chatInputs = page.locator('div[contenteditable="true"], p[contenteditable="true"], textarea, [role="textbox"]');
     let chatInput = chatInputs.first();
     for (let index = 0; index < await chatInputs.count(); index++) {
@@ -797,20 +942,77 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
       }
     }
     if ((await chatInputs.count()) === 0 || !(await chatInput.isVisible().catch(() => false))) {
+      const chatPageText = await page.locator('body').innerText().catch(() => '');
       await page.close();
-      await releaseBrowserConnection(browser);
-      const error = `Campo de digitacao do chat nao encontrado para @${cleanUsername}.`;
+      await browser.close();
+      const messagingBlocked = /n[aã]o (?:pode|permite).*mensagem|doesn.?t allow.*message|can.?t message|unable to message/i.test(chatPageText);
+      const error = messagingBlocked
+        ? `@${cleanUsername} não aceita mensagens de contas que não segue. Pule este lead ou tente outro canal.`
+        : `Campo de digitação do chat não encontrado para @${cleanUsername}.`;
       await setWorkerState({ status: 'ERRO', activity: error, lastError: error });
       return { success: false, error };
     }
 
     await chatInput.focus();
     await chatInput.fill(messageToSend);
-    await chatInput.press('Enter');
-    await page.waitForTimeout(3000);
-    await page.close();
-    await releaseBrowserConnection(browser);
+    await page.waitForTimeout(800);
+    const screenshotBuffer = await page.screenshot({ type: 'jpeg', quality: 45, fullPage: false });
+    preparedDmPages.set(leadId, { page, browser });
+    await setWorkerState({ status: 'AGUARDANDO', activity: `DM preparada para @${cleanUsername}; aguardando confirmação`, lastError: null });
+    return {
+      success: true,
+      prepared: true,
+      message: messageToSend,
+      screenshot: `data:image/jpeg;base64,${screenshotBuffer.toString('base64')}`,
+    };
+  } catch (err: any) {
+    if (browser?.isConnected()) await browser.close().catch(() => undefined);
+    const error = `Erro durante execucao do Playwright: ${err?.message ?? 'falha desconhecida'}`;
+    await setWorkerState({ status: 'ERRO', activity: 'Falha no envio', lastError: error });
+    return { success: false, error };
+  }
+}
 
+export async function confirmPreparedDmViaBrowser(leadId: string, requestedMessage: string): Promise<{ success: boolean; error?: string; dryRun?: boolean }> {
+  const messageToSend = requestedMessage.trim();
+  if (!messageToSend) return { success: false, error: 'A mensagem está vazia.' };
+
+  const s = await getSettings();
+  const dryRun = s?.prospectionDryRun ?? process.env.PROSPECTION_DRY_RUN !== 'false';
+  if (dryRun) return { success: true, dryRun: true };
+
+  const counter = await getCounter();
+  if (counter.count >= counter.limit) return { success: false, error: `Limite diário de envio (${counter.limit} DMs) atingido.` };
+
+  const lead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
+  if (!lead?.instagramUsername) return { success: false, error: 'Lead ou Instagram não encontrado.' };
+  if (lead.doNotContact) return { success: false, error: 'Lead marcado como NÃO CONTATAR.' };
+
+  try {
+    const prepared = preparedDmPages.get(leadId);
+    const page = prepared?.page && !prepared.page.isClosed() ? prepared.page : null;
+    if (!page) return { success: false, error: 'A conversa preparada não está mais aberta. Clique em “Preparar DM” novamente.' };
+
+    const inputs = page.locator('div[contenteditable="true"], p[contenteditable="true"], textarea, [role="textbox"]');
+    let chatInput = inputs.first();
+    for (let index = 0; index < await inputs.count(); index++) {
+      const candidate = inputs.nth(index);
+      if (await candidate.isVisible().catch(() => false)) {
+        chatInput = candidate;
+        break;
+      }
+    }
+    if (!(await chatInput.isVisible().catch(() => false))) {
+      return { success: false, error: 'O campo da conversa não está mais disponível. Prepare a DM novamente.' };
+    }
+
+    const currentText = await chatInput.textContent().catch(() => '');
+    if ((currentText ?? '').trim() !== messageToSend) await chatInput.fill(messageToSend);
+    await chatInput.press('Enter');
+    preparedDmPages.delete(leadId);
+    await prepared?.browser.close().catch(() => undefined);
+
+    const now = new Date();
     await db.update(leads).set({
       pipelineStage: 'CONTATO REALIZADO',
       conversationProvider: 'BROWSER',
@@ -818,25 +1020,25 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
       lastContactAt: now,
       updatedAt: now,
     }).where(eq(leads.id, leadId));
-
     await db.insert(activities).values({
-      id: crypto.randomUUID(),
-      leadId,
-      type: 'MESSAGE_SENT',
-      channel: 'INSTAGRAM',
-      direction: 'OUTBOUND',
+      id: crypto.randomUUID(), leadId, type: 'MESSAGE_SENT', channel: 'INSTAGRAM', direction: 'OUTBOUND',
       content: messageToSend,
-      metadata: JSON.stringify({ provider: 'BROWSER', via: 'PLAYWRIGHT_CDP' }),
+      metadata: JSON.stringify({ provider: 'BROWSER', via: 'PLAYWRIGHT_CDP', confirmedInCrm: true }),
       createdAt: now,
     });
-
     await incrementCounter();
-    await setWorkerState({ status: 'ATIVO', activity: 'Envio concluido', lastError: null });
+    await setWorkerState({ status: 'ATIVO', activity: `DM enviada para @${lead.instagramUsername}`, lastError: null });
     return { success: true };
   } catch (err: any) {
-    await releaseBrowserConnection(browser);
-    const error = `Erro durante execucao do Playwright: ${err?.message ?? 'falha desconhecida'}`;
-    await setWorkerState({ status: 'ERRO', activity: 'Falha no envio', lastError: error });
+    const error = `Erro ao confirmar a DM: ${err?.message ?? 'falha desconhecida'}`;
+    await setWorkerState({ status: 'ERRO', activity: 'Falha ao confirmar envio', lastError: error });
     return { success: false, error };
   }
+}
+
+export async function cancelPreparedDmViaBrowser(leadId: string) {
+  const prepared = preparedDmPages.get(leadId);
+  preparedDmPages.delete(leadId);
+  if (prepared?.browser.isConnected()) await prepared.browser.close().catch(() => undefined);
+  return { success: true };
 }

@@ -246,7 +246,58 @@ export async function searchInstagramUsernames(
   businessName: string,
   city: string | null,
 ): Promise<string[]> {
-  const query = `${businessName}${city ? ` ${city}` : ''}`.trim();
+  const directCandidates = new Set<string>();
+
+  const ddgQueries = [
+    `${businessName} ${city ?? ''} site:instagram.com`.trim(),
+    `${businessName} Instagram ${city ?? ''}`.trim(),
+    `${businessName} ${city ?? ''}`.trim(),
+  ];
+
+  for (const query of ddgQueries) {
+    if (!query) continue;
+
+    try {
+      await page.goto(`https://duckduckgo.com/?q=${encodeURIComponent(query)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+      await page.waitForTimeout(1800);
+
+      const handles = await page.evaluate(() => {
+        const values = new Set<string>();
+        const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
+
+        for (const anchor of links) {
+          const href = anchor.href || '';
+          if (!href.includes('instagram.com')) continue;
+          try {
+            const url = new URL(href);
+            const path = url.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)[0] ?? '';
+            if (!path || ['accounts', 'explore', 'reels', 'p', 'direct', 'stories', 'tags', 'about', 'privacy', 'terms', 'login', 'signup'].includes(path.toLowerCase())) continue;
+            if (/^[A-Za-z0-9._]+$/.test(path)) values.add(path.toLowerCase());
+          } catch {
+            // ignore malformed urls
+          }
+        }
+
+        return Array.from(values).slice(0, 12);
+      });
+
+      for (const handle of handles) {
+        directCandidates.add(handle);
+      }
+
+      if (directCandidates.size >= 10) break;
+    } catch {
+      // DuckDuckGo may block the bot or return a different page; continue with the next fallback
+    }
+  }
+
+  if (directCandidates.size > 0) {
+    return Array.from(directCandidates).slice(0, 10);
+  }
+
   const fallbackGuesses = Array.from(
     new Set([
       ...guessInstagramUsernames(businessName),
@@ -255,7 +306,6 @@ export async function searchInstagramUsernames(
     ])
   ).slice(0, 8);
 
-  const directCandidates = new Set<string>();
   for (const candidate of fallbackGuesses) {
     try {
       await page.goto(`https://www.instagram.com/${candidate}/`, { waitUntil: 'domcontentloaded', timeout: 18000 });
@@ -272,47 +322,7 @@ export async function searchInstagramUsernames(
     }
   }
 
-  if (directCandidates.size > 0) {
-    return Array.from(directCandidates).slice(0, 6);
-  }
-
-  try {
-    await page.goto(`https://www.instagram.com/explore/search/keyword/?q=${encodeURIComponent(query)}`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 25000,
-    });
-    await page.waitForTimeout(1500);
-
-    const candidates = await page.evaluate(() => {
-      const ignored = new Set(['explore', 'accounts', 'reels', 'p', 'direct', 'web', 'popular', 'legal', 'about', 'privacy', 'terms']);
-      return Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href^="/"]'))
-        .map((anchor) => ({
-          username: (anchor.getAttribute('href') ?? '').split('/').filter(Boolean)[0] ?? '',
-          label: anchor.textContent?.trim() ?? '',
-        }))
-        .filter(({ username }) => username && !ignored.has(username.toLowerCase()) && /^[A-Za-z0-9._]+$/.test(username))
-        .slice(0, 12);
-    });
-
-    if (candidates.length > 0) {
-      const ranked = candidates
-        .map((candidate) => ({
-          username: candidate.username,
-          score: Math.max(scoreUsernameMatch(businessName, candidate.username), scoreUsernameMatch(businessName, candidate.label)),
-        }))
-        .filter((item) => item.score >= 25)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 6);
-
-      for (const item of ranked.map((entry) => entry.username.toLowerCase())) {
-        directCandidates.add(item);
-      }
-    }
-  } catch {
-    // fallback only; direct guesses already take priority
-  }
-
-  return Array.from(directCandidates).slice(0, 6);
+  return Array.from(directCandidates).slice(0, 10);
 }
 
 // Deprecated fallback to keep types clean if anything else calls it
@@ -393,6 +403,26 @@ export function calculateConfidenceScore(
   const displayNameMatch = profile.displayName ? normalizeString(profile.displayName).includes(normalizeString(businessName)) : false;
   if (displayNameMatch) {
     score += 12;
+    signals.push('name');
+  }
+
+  const businessNameVariants = Array.from(new Set([
+    normalizeString(businessName),
+    normalizeString(businessName).replace(/\s+(de|da|do|dos|das|e|em)\s+/g, ' '),
+    normalizeString(businessName).replace(/\s+/g, ''),
+    normalizeString(profile.displayName ?? businessName),
+  ].filter(Boolean)));
+
+  const bioContainsBusiness = !!(profile.bio && businessNameVariants.some((variant) => {
+    if (!variant) return false;
+    return normalizeString(profile.bio ?? '').includes(variant) || (variant.length >= 8 && normalizeString(profile.bio ?? '').includes(`@${variant}`));
+  }));
+  const usernameContainsBusiness = !!(profile.username && businessNameVariants.some((variant) => {
+    if (!variant || variant.length < 4) return false;
+    return normalizeString(profile.username).includes(variant) || variant.includes(normalizeString(profile.username));
+  }));
+  if (bioContainsBusiness || usernameContainsBusiness) {
+    score += 18;
     signals.push('name');
   }
 
@@ -781,15 +811,20 @@ export async function enrichLeadWithInstagram(
   };
 
   const patch = {
+    businessName: lead.businessName.startsWith('@') && profile.displayName
+      ? profile.displayName
+      : lead.businessName,
     instagramUsername: profile.username,
     instagramUrl: `https://www.instagram.com/${profile.username}/`,
     followers: profile.followers,
+    postsCount: profile.postsCount,
+    profileSnippet: profile.profileText?.slice(0, 2000) ?? null,
     instagramActive: profile.isActive,
     notes: JSON.stringify({ ...(lead.notes ? { previousNotes: lead.notes } : {}), igBio: profile.bio ?? undefined }),
     category: lead.category ?? profile.category,
-    hasDelivery: lead.hasDelivery ?? /delivery|ifood|rappi|entrega/i.test(bioLower) ? true : lead.hasDelivery,
-    hasDiningRoom: lead.hasDiningRoom ?? /sal[aã]o|mesa|garçom|garcom|rod[ií]zio/i.test(bioLower) ? true : lead.hasDiningRoom,
-    hasWaiters: lead.hasWaiters ?? /garçom|garcom|sal[aã]o/i.test(bioLower) ? true : lead.hasWaiters,
+    hasDelivery: lead.hasDelivery ?? (/delivery|ifood|rappi|entrega/i.test(bioLower) ? true : null),
+    hasDiningRoom: lead.hasDiningRoom ?? (/sal[aã]o|mesa|garçom|garcom|rod[ií]zio/i.test(bioLower) ? true : null),
+    hasWaiters: lead.hasWaiters ?? (/garçom|garcom|sal[aã]o/i.test(bioLower) ? true : null),
     phone: lead.phone ?? profile.phone ?? lead.phone,
     website: lead.website ?? profile.website ?? lead.website,
     websiteDomain: lead.websiteDomain ?? websiteDomain ?? lead.websiteDomain,

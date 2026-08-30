@@ -3,7 +3,7 @@
 import { useState, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button, buttonVariants } from '@/components/ui/button';
+import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog,
@@ -15,10 +15,10 @@ import {
 } from '@/components/ui/dialog';
 import { analyzeLeadAction, generateMessageAction } from '@/app/actions/ai';
 import { markMessageSent, doNotContactLead, clearAllLeadsAction } from '@/app/actions';
-import { sendFirstDmAction } from '@/app/settings/actions-automation';
+import { cancelPreparedDmAction, confirmPreparedDmAction, previewInstagramProfileAction, sendFirstDmAction } from '@/app/settings/actions-automation';
 import {
-  BrainCircuit, MessageSquareText, ExternalLink, CheckCircle,
-  SkipForward, Copy, Check, AlertTriangle, RefreshCw, BanIcon, Bot
+  AtSign, BrainCircuit, MessageSquareText, CheckCircle, Send,
+  SkipForward, Copy, Check, AlertTriangle, RefreshCw, BanIcon, Bot, X
 } from 'lucide-react';
 
 type Lead = {
@@ -29,6 +29,12 @@ type Lead = {
   category: string | null;
   subcategory: string | null;
   followers: number | null;
+  phone: string | null;
+  website: string | null;
+  city: string | null;
+  state: string | null;
+  rating: number | null;
+  reviewCount: number | null;
   hasDelivery: boolean | null;
   hasDiningRoom: boolean | null;
   hasWaiters: boolean | null;
@@ -51,13 +57,26 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   const [error, setError] = useState<string | null>(null);
   const [showDoNotContactDialog, setShowDoNotContactDialog] = useState(false);
   const [isAutoSending, setIsAutoSending] = useState(false);
+  const [isConfirmingDm, setIsConfirmingDm] = useState(false);
+  const [showInstagramPanel, setShowInstagramPanel] = useState(false);
+  const [dmStatus, setDmStatus] = useState<'IDLE' | 'VIEWING' | 'CONNECTING' | 'PREPARED' | 'SENT' | 'ERROR'>('IDLE');
+  const [instagramScreenshot, setInstagramScreenshot] = useState<string | null>(null);
 
   const clearError = () => setError(null);
+
+  const resetDmPanel = () => {
+    setShowInstagramPanel(false);
+    setInstagramScreenshot(null);
+    setDmStatus('IDLE');
+    setIsAutoSending(false);
+    setIsConfirmingDm(false);
+  };
 
   const handleClearAll = async () => {
     if (!window.confirm("Deseja realmente limpar todos os leads e atividades do banco?")) return;
     const res = await clearAllLeadsAction();
     if (res.success) {
+      resetDmPanel();
       setLeads([]);
       setCurrentIndex(0);
       setError(null);
@@ -118,6 +137,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setIsSending(true);
     const res = await markMessageSent(currentLead.id, message);
     if (res.success) {
+      await cancelPreparedDmAction(currentLead.id);
+      resetDmPanel();
       setMessage('');
       setCurrentIndex(prev => prev + 1);
     } else {
@@ -126,10 +147,31 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setIsSending(false);
   };
 
-  const handleSkip = () => {
+  const handleSkip = async () => {
     clearError();
+    const skippedLead = leads[currentIndex];
+    if (skippedLead) await cancelPreparedDmAction(skippedLead.id);
+    resetDmPanel();
     setMessage('');
     setCurrentIndex(prev => prev + 1);
+  };
+
+  const handlePreviewInstagram = async () => {
+    if (!currentLead || isAutoSending) return;
+    clearError();
+    setShowInstagramPanel(true);
+    setDmStatus('CONNECTING');
+    setInstagramScreenshot(null);
+    setIsAutoSending(true);
+    const res = await previewInstagramProfileAction(currentLead.id);
+    setIsAutoSending(false);
+    if (res.success && res.screenshot) {
+      setInstagramScreenshot(res.screenshot);
+      setDmStatus('VIEWING');
+    } else {
+      setDmStatus('ERROR');
+      setError(res.error || 'Não foi possível visualizar o perfil do Instagram.');
+    }
   };
 
   const handleAutoSend = async () => {
@@ -137,17 +179,42 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     const currentLead = leads[currentIndex];
     if (isAutoSending) return;
     clearError();
+    setShowInstagramPanel(true);
+    setDmStatus('CONNECTING');
+    setInstagramScreenshot(null);
     setIsAutoSending(true);
     const res = await sendFirstDmAction(currentLead.id, message.trim() || undefined);
     setIsAutoSending(false);
-    if (res.success) {
-      setMessage('');
-      if (res.dryRun) {
-        setError('MODO DE TESTE ativo: mensagem gerada e registrada, mas nenhum envio real foi feito.');
-      }
-      setCurrentIndex(prev => prev + 1);
+    if (res.success && res.prepared) {
+      if (res.message) setMessage(res.message);
+      setInstagramScreenshot(res.screenshot ?? null);
+      setDmStatus('PREPARED');
     } else {
+      setDmStatus('ERROR');
       setError(res.error || 'Falha ao enviar DM via automação.');
+    }
+  };
+
+  const handleConfirmDm = async () => {
+    if (!currentLead || !message.trim() || isConfirmingDm) return;
+    clearError();
+    setIsConfirmingDm(true);
+    const res = await confirmPreparedDmAction(currentLead.id, message);
+    setIsConfirmingDm(false);
+    if (res.success) {
+      setDmStatus('SENT');
+      if (res.dryRun) {
+        setError('MODO DE TESTE ativo: a mensagem foi preparada, mas o envio real continua bloqueado.');
+        return;
+      }
+      setTimeout(() => {
+        resetDmPanel();
+        setMessage('');
+        setCurrentIndex((prev) => prev + 1);
+      }, 900);
+    } else {
+      setDmStatus('ERROR');
+      setError(res.error || 'Falha ao confirmar o envio da DM.');
     }
   };
 
@@ -157,6 +224,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setShowDoNotContactDialog(false);
     const res = await doNotContactLead(currentLead.id);
     if (res.success) {
+      await cancelPreparedDmAction(currentLead.id);
+      resetDmPanel();
       setMessage('');
       setCurrentIndex(prev => prev + 1);
     } else {
@@ -187,7 +256,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-4">
+    <div className="max-w-7xl mx-auto space-y-4">
       <div className="flex justify-end">
         <Button variant="destructive" size="sm" onClick={handleClearAll}>
           Limpar Todos os Leads
@@ -202,7 +271,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
         </div>
       )}
 
-      <Card className="border-2 border-neutral-200 dark:border-neutral-800 shadow-lg">
+      <div className={showInstagramPanel ? 'grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_420px] gap-4 items-start' : ''}>
+      <Card className="border-2 border-neutral-200 dark:border-neutral-800 shadow-lg min-w-0">
         <CardHeader className="bg-neutral-50 dark:bg-neutral-900/60 border-b border-neutral-200 dark:border-neutral-800 rounded-t-xl">
           <div className="flex justify-between items-start gap-4">
             <div className="flex-1 min-w-0">
@@ -216,8 +286,12 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               </CardTitle>
               <div className="flex flex-wrap gap-3 mt-2 text-sm text-neutral-500">
                 <span>📍 {currentLead!.neighborhood ?? 'Bairro não informado'}</span>
+                {(currentLead!.city || currentLead!.state) && <span>• {[currentLead!.city, currentLead!.state].filter(Boolean).join(' / ')}</span>}
                 <span>•</span>
                 <span>👥 {currentLead!.followers?.toLocaleString('pt-BR') ?? 0} seguidores</span>
+                {currentLead!.rating != null && <span>• ⭐ {currentLead!.rating.toLocaleString('pt-BR')}{currentLead!.reviewCount != null ? ` (${currentLead!.reviewCount} avaliações)` : ''}</span>}
+                {currentLead!.phone && <span>• 📞 {currentLead!.phone}</span>}
+                {currentLead!.website && <span className="max-w-xs truncate">• 🌐 {currentLead!.website}</span>}
                 {normalizedInstagram && (
                   <>
                     <span>•</span>
@@ -352,13 +426,13 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
 
           <div className="flex gap-2 flex-wrap">
             {normalizedInstagram ? (
-              <a href={`https://instagram.com/${normalizedInstagram}`} target="_blank" rel="noreferrer noopener" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
-                <ExternalLink className="w-4 h-4 mr-1.5" />
-                Abrir Instagram
-              </a>
+              <Button variant="outline" size="sm" onClick={handlePreviewInstagram} disabled={isAutoSending}>
+                <AtSign className="w-4 h-4 mr-1.5" />
+                Visualizar perfil
+              </Button>
             ) : (
               <Button variant="outline" size="sm" disabled title="Instagram não cadastrado">
-                <ExternalLink className="w-4 h-4 mr-1.5" />
+                <AtSign className="w-4 h-4 mr-1.5" />
                 Sem Instagram
               </Button>
             )}
@@ -383,7 +457,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               ) : (
                 <Bot className="w-4 h-4 mr-1.5" />
               )}
-              {isAutoSending ? 'Processando...' : normalizedInstagram ? 'Enviar DM (Automação)' : 'Buscar Instagram e enviar'}
+              {isAutoSending ? 'Abrindo conversa...' : normalizedInstagram ? 'Preparar DM' : 'Buscar Instagram e preparar'}
             </Button>
 
             <Button
@@ -398,6 +472,58 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
           </div>
         </CardFooter>
       </Card>
+
+      {showInstagramPanel && (
+        <Card className="overflow-hidden border-neutral-300 shadow-lg xl:sticky xl:top-4">
+          <CardHeader className="border-b bg-gradient-to-r from-fuchsia-600 via-pink-600 to-orange-500 p-4 text-white">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-2 border-white/80 bg-white/20 font-bold">
+                  {(normalizedInstagram || currentLead!.businessName).slice(0, 1).toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <CardTitle className="truncate text-base">@{normalizedInstagram || 'instagram pendente'}</CardTitle>
+                  <p className="truncate text-xs text-white/80">{currentLead!.businessName}</p>
+                </div>
+              </div>
+              <button onClick={() => setShowInstagramPanel(false)} aria-label="Fechar painel" className="rounded-full p-1 hover:bg-white/20">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4 p-4">
+            <div className="flex items-center gap-2 text-xs font-medium">
+              <span className={`h-2.5 w-2.5 rounded-full ${dmStatus === 'ERROR' ? 'bg-red-500' : dmStatus === 'PREPARED' ? 'bg-amber-500' : dmStatus === 'SENT' ? 'bg-green-500' : dmStatus === 'CONNECTING' ? 'animate-pulse bg-blue-500' : 'bg-neutral-300'}`} />
+              {dmStatus === 'CONNECTING' && 'Carregando o Instagram em segundo plano...'}
+              {dmStatus === 'VIEWING' && 'Perfil do Instagram carregado'}
+              {dmStatus === 'PREPARED' && 'Mensagem digitada — aguardando sua confirmação'}
+              {dmStatus === 'SENT' && 'Mensagem enviada e registrada no CRM'}
+              {dmStatus === 'ERROR' && 'Não foi possível preparar a conversa'}
+              {dmStatus === 'IDLE' && 'Clique em “Preparar DM” para abrir a conversa'}
+            </div>
+
+            {instagramScreenshot ? (
+              <div className="aspect-[4/3] rounded-lg border bg-cover bg-top shadow-inner" style={{ backgroundImage: `url(${instagramScreenshot})` }} role="img" aria-label="Visualização atual do Instagram Direct" />
+            ) : (
+              <div className="flex aspect-[4/3] flex-col items-center justify-center gap-3 rounded-lg border border-dashed bg-neutral-50 text-center text-neutral-500 dark:bg-neutral-900">
+                {dmStatus === 'CONNECTING' ? <RefreshCw className="h-8 w-8 animate-spin text-pink-500" /> : <AtSign className="h-10 w-10 text-pink-500" />}
+                <p className="max-w-64 text-sm">A visualização do Direct aparecerá aqui, sem sair do CRM.</p>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Mensagem no chat</p>
+              <Textarea value={message} onChange={(event) => setMessage(event.target.value)} className="min-h-28 resize-none" placeholder="A mensagem será digitada aqui e no Instagram Direct." />
+            </div>
+            <Button className="w-full bg-blue-600 text-white hover:bg-blue-700" onClick={handleConfirmDm} disabled={dmStatus !== 'PREPARED' || !message.trim() || isConfirmingDm}>
+              {isConfirmingDm ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
+              {isConfirmingDm ? 'Confirmando...' : 'Confirmar e enviar agora'}
+            </Button>
+            <p className="text-center text-[11px] text-neutral-400">O sistema só pressiona Enter depois desta confirmação.</p>
+          </CardContent>
+        </Card>
+      )}
+      </div>
 
       <div className="text-center text-sm text-neutral-500">
         Lead <strong>{currentIndex + 1}</strong> de <strong>{leads.length}</strong> na fila de hoje

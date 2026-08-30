@@ -77,7 +77,47 @@ function normalizeLeadAnalysisPayload(raw: unknown) {
   };
 }
 
-export async function analyzeLeadAction(leadId: string) {
+// Helper: timeout wrapper with AbortController
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  const timeoutPromise = new Promise<T>((_, reject) =>
+    setTimeout(() => reject(new Error(`Timeout apos ${timeoutMs}ms`)), timeoutMs)
+  );
+  return Promise.race([promise, timeoutPromise]);
+}
+
+// Helper: Fast fallback scoring based on lead characteristics
+function getFallbackScore(lead: typeof leads.$inferSelect): { score: number; qualification: string; reasons: string[] } {
+  let score = 30;
+  const reasons: string[] = ['Analise de IA indisponivel; score baseado em dados basicos.'];
+
+  if (lead.followers && lead.followers > 5000) {
+    score += 20;
+    reasons.push('Presenca digital forte (5k+ seguidores).');
+  }
+  if (lead.hasDelivery) {
+    score += 15;
+    reasons.push('Operacoes de delivery aumentam complexidade operacional.');
+  }
+  if (lead.hasDiningRoom) {
+    score += 10;
+    reasons.push('Salao exige gestao de mesas e comandas.');
+  }
+  if (lead.hasWaiters) {
+    score += 10;
+    reasons.push('Presenca de garcons sugere operacoes complexas.');
+  }
+  if (lead.rating && lead.rating >= 4.5) {
+    score += 5;
+    reasons.push('Alta avaliacao (reputacao consolidada).');
+  }
+
+  score = Math.min(100, score);
+  const qualification = score >= 70 ? 'ALTA PRIORIDADE' : score >= 50 ? 'BOA OPORTUNIDADE' : score >= 30 ? 'MÉDIA PRIORIDADE' : 'BAIXA PRIORIDADE';
+
+  return { score, qualification, reasons };
+}
+
+export async function analyzeLeadAction(leadId: string, retryCount: number = 0): Promise<{ success: boolean; result?: typeof ScoreSchema._type; error?: string; fallback?: boolean }> {
   try {
     const openai = getOpenAI();
     const leadRecord = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
@@ -106,26 +146,73 @@ Múltiplas Unidades: ${lead.hasMultipleUnits ? 'Sim' : 'Não'}
 Notas: ${lead.notes ?? 'Sem notas.'}
 Informações institucionais da Sirrus: ${((await db.select().from(settings).limit(1))[0]?.institutionalText ?? 'Não configuradas')}`;
 
-    const response = await openai.chat.completions.create({
-      model: getAiModel(),
-      reasoning_effort: 'low',
-      messages: [
-        { role: 'system', content: 'Você é um especialista em vendas da Sirrus, sistemas de gestão para food service. Nunca invente dados não fornecidos. Responda em JSON válido correspondente ao schema do lead.' },
-        { role: 'user', content: prompt + '\n\nRetorne a resposta estritamente no formato JSON com as chaves: score (número 0-100), qualification ("ALTA PRIORIDADE" | "BOA OPORTUNIDADE" | "MÉDIA PRIORIDADE" | "BAIXA PRIORIDADE"), reasons (array de strings), possibleNeeds (array de strings: PDV, comandas, mesas, estoque, delivery), confidence (número 0.0-1.0), summary (string).' },
-      ],
-      response_format: { type: 'json_object' },
-    });
+    // Call IA with 30-second timeout
+    let rawContent: string | null = null;
+    try {
+      const response = await withTimeout(
+        openai.chat.completions.create({
+          model: getAiModel(),
+          reasoning_effort: 'low',
+          messages: [
+            { role: 'system', content: 'Você é um especialista em vendas da Sirrus, sistemas de gestão para food service. Nunca invente dados não fornecidos. Responda em JSON válido correspondente ao schema do lead.' },
+            { role: 'user', content: prompt + '\n\nRetorne a resposta estritamente no formato JSON com as chaves: score (número 0-100), qualification ("ALTA PRIORIDADE" | "BOA OPORTUNIDADE" | "MÉDIA PRIORIDADE" | "BAIXA PRIORIDADE"), reasons (array de strings), possibleNeeds (array de strings: PDV, comandas, mesas, estoque, delivery), confidence (número 0.0-1.0), summary (string).' },
+          ],
+          response_format: { type: 'json_object' },
+        }),
+        30000 // 30-second timeout
+      );
+      rawContent = response.choices[0].message.content;
+    } catch (timeoutErr: any) {
+      if (retryCount < 2) {
+        console.warn(`[AI] Timeout/erro na tentativa ${retryCount + 1}, tentando novamente...`, timeoutErr?.message);
+        await new Promise(r => setTimeout(r, 1000 * (retryCount + 1))); // Backoff
+        return analyzeLeadAction(leadId, retryCount + 1);
+      } else {
+        console.warn(`[AI] Falha apos 3 tentativas para lead ${leadId}. Usando fallback.`, timeoutErr?.message);
+        // Use fallback scoring
+        const fallback = getFallbackScore(lead);
+        const result = {
+          score: fallback.score,
+          qualification: fallback.qualification,
+          reasons: fallback.reasons,
+          possibleNeeds: lead.category?.toLowerCase().includes('pizzaria') ? ['PDV', 'comandas'] : ['PDV', 'estoque'],
+          confidence: 0.3,
+          summary: `Analise rapida via fallback. ${fallback.reasons.join(' ')}`,
+        };
 
-    const rawContent = response.choices[0].message.content;
+        const now = new Date();
+        await db.update(leads)
+          .set({
+            leadScore: result.score,
+            qualificationStatus: result.qualification,
+            painPoints: JSON.stringify(result.possibleNeeds),
+            pipelineStage: lead.pipelineStage === 'NOVO' || lead.pipelineStage === 'PESQUISANDO' ? (result.score >= 50 ? 'QUALIFICADO' : 'DESCARTADO') : lead.pipelineStage,
+            updatedAt: now,
+          })
+          .where(eq(leads.id, leadId));
+
+        await db.insert(activities).values({
+          id: crypto.randomUUID(),
+          leadId,
+          type: 'AI_ANALYSIS',
+          content: `[FALLBACK] Score: ${result.score}/100 (${result.qualification})\n\nResumo: ${result.summary}\n\nMotivos: ${result.reasons.join(', ')}\n\nNecessidades: ${result.possibleNeeds.join(', ')}`,
+          metadata: JSON.stringify({ score: result.score, qualification: result.qualification, confidence: result.confidence, reasons: result.reasons, possibleNeeds: result.possibleNeeds, fallback: true }),
+          createdAt: now,
+        });
+
+        return { success: true, result, fallback: true };
+      }
+    }
+
     if (!rawContent) throw new Error('Falha ao obter resposta da IA.');
 
     let parsed: unknown;
     try {
       parsed = extractJsonObject(rawContent);
     } catch {
-      const fallback = rawContent.match(/\{[\s\S]*\}/)?.[0];
-      if (!fallback) throw new Error('Resposta da IA não está em JSON válido.');
-      parsed = extractJsonObject(fallback);
+      const fallbackJson = rawContent.match(/\{[\s\S]*\}/)?.[0];
+      if (!fallbackJson) throw new Error('Resposta da IA não está em JSON válido.');
+      parsed = extractJsonObject(fallbackJson);
     }
 
     const normalized = normalizeLeadAnalysisPayload(parsed);
@@ -161,6 +248,35 @@ Informações institucionais da Sirrus: ${((await db.select().from(settings).lim
     return { success: true, result };
   } catch (error: any) {
     console.error('Error analyzing lead:', error);
+    // Return fallback on final error
+    try {
+      const leadRecord = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
+      const lead = leadRecord[0];
+      if (lead) {
+        const fallback = getFallbackScore(lead);
+        const result = {
+          score: fallback.score,
+          qualification: fallback.qualification,
+          reasons: fallback.reasons,
+          possibleNeeds: ['PDV', 'estoque'],
+          confidence: 0.2,
+          summary: 'Analise indisponivel; fallback aplicado.',
+        };
+        const now = new Date();
+        await db.update(leads)
+          .set({
+            leadScore: result.score,
+            qualificationStatus: result.qualification,
+            painPoints: JSON.stringify(result.possibleNeeds),
+            pipelineStage: 'DESCARTADO',
+            updatedAt: now,
+          })
+          .where(eq(leads.id, leadId));
+        return { success: true, result, fallback: true };
+      }
+    } catch (fallbackErr: any) {
+      console.error('Fallback also failed:', fallbackErr);
+    }
     return { success: false, error: error.message };
   }
 }

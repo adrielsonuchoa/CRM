@@ -6,6 +6,9 @@ import {
   pauseWorker,
   checkChromeConnection,
   sendFirstDmViaBrowser,
+  confirmPreparedDmViaBrowser,
+  cancelPreparedDmViaBrowser,
+  previewInstagramProfileViaBrowser,
   enrichLeadViaBrowser,
   testWorkerReadiness,
   getRecentWorkerActivities,
@@ -66,6 +69,22 @@ export async function sendFirstDmAction(leadId: string, message?: string) {
   revalidatePath('/leads');
   revalidatePath(`/leads/${leadId}`);
   return result;
+}
+
+export async function confirmPreparedDmAction(leadId: string, message: string) {
+  const result = await confirmPreparedDmViaBrowser(leadId, message);
+  revalidatePath('/prospecting');
+  revalidatePath('/pipeline');
+  revalidatePath(`/leads/${leadId}`);
+  return result;
+}
+
+export async function previewInstagramProfileAction(leadId: string) {
+  return previewInstagramProfileViaBrowser(leadId);
+}
+
+export async function cancelPreparedDmAction(leadId: string) {
+  return cancelPreparedDmViaBrowser(leadId);
 }
 
 export async function testMetaIntegrationAction() {

@@ -2,10 +2,10 @@
 
 import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import { PipelineCard } from './pipeline-card';
+import { PipelineCard, type PipelineLead } from './pipeline-card';
 import { Badge } from '@/components/ui/badge';
 
-export function PipelineColumn({ stage, leads }: { stage: string; leads: any[] }) {
+export function PipelineColumn({ stage, leads }: { stage: string; leads: PipelineLead[] }) {
   const { setNodeRef, isOver } = useDroppable({
     id: stage,
     data: {
