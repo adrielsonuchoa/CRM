@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useTransition, useEffect } from 'react';
+import { useState, useTransition } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,7 +16,7 @@ import {
 } from './actions-automation';
 import {
   CheckCircle2, AlertTriangle, KeyRound, BrainCircuit, ClipboardList, User,
-  Bot, RefreshCw, Play, Pause, Radio, ShieldCheck, Share2
+  Bot, RefreshCw, Play, Pause, ShieldCheck, Share2
 } from 'lucide-react';
 
 type SettingsData = {

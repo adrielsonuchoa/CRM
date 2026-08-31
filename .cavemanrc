@@ -1,0 +1,9 @@
+{
+  "mode": "full",
+  "rules": {
+    "skipIntroductions": true,
+    "skipConclusions": true,
+    "compactCodeBlocks": true,
+    "bulletOverParagraph": true
+  }
+}

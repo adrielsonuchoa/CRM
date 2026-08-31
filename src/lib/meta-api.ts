@@ -1,7 +1,3 @@
-import { db } from '@/db';
-import { leads, activities } from '@/db/schema';
-import { eq } from 'drizzle-orm';
-import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 

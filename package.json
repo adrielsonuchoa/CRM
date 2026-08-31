@@ -10,6 +10,8 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "worker": "tsx scripts/browser-worker.ts",
     "test": "tsx scripts/test-automation.ts",
+    "test:messages": "tsx --env-file=.env.local scripts/test-messages.ts",
+    "test:messages:real": "tsx --env-file=.env.local scripts/test-messages.ts --real",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

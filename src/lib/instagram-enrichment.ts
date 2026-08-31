@@ -25,15 +25,6 @@ function normalizeName(value: string) {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function meaningfulWords(value: string) {
-  return value
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((word) => word.length >= 3);
-}
-
 function parseCount(value: string | null | undefined): number | null {
   if (!value) return null;
   const cleaned = value.trim().toLowerCase().replace(/\s+/g, ' ').replace(',', '.');
@@ -100,28 +91,6 @@ export function guessInstagramUsernames(businessName: string): string[] {
     });
 
   return ordered;
-}
-
-function scoreUsernameMatch(businessName: string, username: string) {
-  const normalizedBusiness = normalizeName(businessName);
-  const normalizedUsername = normalizeName(username);
-  if (!normalizedBusiness || !normalizedUsername) return 0;
-
-  const businessCompact = normalizedBusiness.replace(/[^a-z0-9]/g, '');
-  const usernameCompact = normalizedUsername.replace(/[^a-z0-9]/g, '');
-
-  if (usernameCompact === businessCompact) return 100;
-  if (businessCompact.includes(usernameCompact) || usernameCompact.includes(businessCompact)) return 90;
-  if (usernameCompact.includes(businessCompact.slice(0, 10)) || businessCompact.includes(usernameCompact.slice(0, 10))) return 80;
-
-  const businessWords = businessName
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((word) => word.length > 2 && !['restaurante', 'restaurantes', 'pizzaria', 'pizzarias', 'bar', 'cafe', 'cafeteria', 'lanchonete', 'delivery', 'maceio', 'al', 'mcz', 'hamburgueria', 'hamburguerias'].includes(word));
-
-  const hits = businessWords.filter((word) => username.toLowerCase().includes(word)).length;
-  if (hits === 0) return 0;
-  return Math.min(70, hits * 25);
 }
 
 export async function scrapeInstagramProfile(page: Page, username: string): Promise<InstagramProfileData | null> {
@@ -229,7 +198,7 @@ function normalizeWebsite(url: string): string {
       clean = clean.slice(0, -1);
     }
     return clean;
-  } catch (e) {
+  } catch {
     return url.trim().toLowerCase();
   }
 }

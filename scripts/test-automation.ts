@@ -54,11 +54,12 @@ async function runAutomationTests() {
   console.log('\n----------------------------------------');
   if (failures === 0) {
     console.log('🎉 Todos os testes de automação passaram com Sucesso!');
-    process.exit(0);
+    process.exitCode = 0;
   } else {
     console.error(`💥 ${failures} teste(s) falharam.`);
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 
-runAutomationTests();
+const keepProcessAlive = setInterval(() => undefined, 1000);
+runAutomationTests().finally(() => clearInterval(keepProcessAlive));

@@ -126,6 +126,7 @@ async function getBrowserConnection() {
 }
 
 function releaseBrowserConnection(_browser: Browser | undefined) {
+  void _browser;
   // A CDP browser belongs to the user. Closing it would close Chrome and its tabs.
 }
 
@@ -512,7 +513,6 @@ export async function runProspectingOnce() {
   let backgroundWorkerBrowser: Browser | undefined;
   const leadIds: string[] = [];
   let discovered = 0;
-  let duplicates = 0;
   let qualified = 0;
 
   try {
@@ -525,7 +525,6 @@ export async function runProspectingOnce() {
       const geoapifyResult = await discoverGeoapifyPlaces(s);
       leadIds.push(...geoapifyResult.leadIds);
       discovered += geoapifyResult.found;
-      duplicates += geoapifyResult.duplicates;
       if (geoapifyResult.errors.length > 0) await setWorkerState({ lastError: geoapifyResult.errors.join(' | ') });
       await setWorkerState({ activity: `${geoapifyResult.found} empresas encontradas no Geoapify` });
     }

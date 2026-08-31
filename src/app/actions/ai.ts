@@ -2,11 +2,11 @@
 
 import OpenAI from 'openai';
 import { z } from 'zod';
-import { zodResponseFormat } from 'openai/helpers/zod';
 import { db } from '@/db';
 import { activities, leads, settings } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import crypto from 'crypto';
+import { generateApproachMessage } from '@/lib/approach-message';
 
 function getOpenAI() {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
@@ -31,6 +31,8 @@ const ScoreSchema = z.object({
   confidence: z.number().describe('Confiança de 0.0 a 1.0'),
   summary: z.string().describe('Resumo factual do estabelecimento, separando fatos de inferências'),
 });
+
+type Qualification = z.infer<typeof ScoreSchema>['qualification'];
 
 function extractJsonObject(content: string) {
   const trimmed = content.trim();
@@ -86,7 +88,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 }
 
 // Helper: Fast fallback scoring based on lead characteristics
-function getFallbackScore(lead: typeof leads.$inferSelect): { score: number; qualification: string; reasons: string[] } {
+function getFallbackScore(lead: typeof leads.$inferSelect): { score: number; qualification: Qualification; reasons: string[] } {
   let score = 30;
   const reasons: string[] = ['Analise de IA indisponivel; score baseado em dados basicos.'];
 
@@ -117,7 +119,7 @@ function getFallbackScore(lead: typeof leads.$inferSelect): { score: number; qua
   return { score, qualification, reasons };
 }
 
-export async function analyzeLeadAction(leadId: string, retryCount: number = 0): Promise<{ success: boolean; result?: typeof ScoreSchema._type; error?: string; fallback?: boolean }> {
+export async function analyzeLeadAction(leadId: string, retryCount: number = 0): Promise<{ success: boolean; result?: z.infer<typeof ScoreSchema>; error?: string; fallback?: boolean }> {
   try {
     const openai = getOpenAI();
     const leadRecord = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
@@ -288,59 +290,16 @@ export async function generateMessageAction(leadId: string, strategy: string = '
     const lead = leadRecord[0];
     if (!lead) throw new Error('Lead não encontrado.');
 
-    const strategyGuides: Record<string, string> = {
-      Consultiva: 'Pergunte sobre o sistema atual sem citar o da Sirrus. Ex: "Hoje vocês usam algum sistema para comandas, caixa e gestão?"',
-      Local: 'Destaque que você é representante em Maceió e pesquisou a região. Ex: "Encontrei o perfil de vocês pesquisando operações da região."',
-      Problema: 'Faça uma pergunta sobre uma dor operacional comum. Ex: "Vocês trabalham com salão e delivery juntos? Pergunto porque tenho trabalhado com restaurantes que buscam centralizar essas operações."',
-      Direta: 'Apresente-se diretamente como representante da Sirrus e pergunte se estão satisfeitos com o sistema atual.',
-    };
+    const settingsRecord = await db.select().from(settings).limit(1);
+    const institutionalText = settingsRecord[0]?.institutionalText?.trim() || 'Não configurado.';
 
-    const guide = strategyGuides[strategy] || strategyGuides['Consultiva'];
-
-    const prompt = `Você é um representante comercial da Sirrus em Maceió/AL. Escreva uma PRIMEIRA MENSAGEM de prospecção para Instagram ou WhatsApp.
-
-Estabelecimento: ${lead.businessName}
-Categoria: ${lead.category ?? 'Restaurante/Bar'}
-Bairro: ${lead.neighborhood ?? 'Maceió'}
-Características: ${[
-      lead.hasDelivery ? 'faz delivery' : null,
-      lead.hasDiningRoom ? 'tem salão' : null,
-      lead.hasWaiters ? 'tem garçons' : null,
-      lead.followers ? `${lead.followers} seguidores no Instagram` : null,
-    ].filter(Boolean).join(', ') || 'não informadas'}
-Presença digital: Instagram ativo = ${lead.instagramActive == null ? 'desconhecido' : lead.instagramActive ? 'sim' : 'não'}; website = ${lead.website ?? 'não informado'}
-Reputação: avaliação ${lead.rating ?? 'não informada'} com ${lead.reviewCount ?? 'número de'} avaliações
-Operação: sistema atual = ${lead.currentSystem ?? 'não informado'}; porte estimado = ${lead.estimatedSize ?? 'não informado'}; complexidade = ${lead.estimatedOperationComplexity ?? 'não informada'}
-Localização: ${lead.address ?? 'endereço não informado'}, ${lead.neighborhood ?? lead.city ?? 'região não informada'}
-Necessidades e observações já registradas: ${lead.painPoints ?? 'nenhuma'}; ${lead.notes ?? 'nenhuma'}
-
-Estratégia: ${strategy}
-Como aplicar: ${guide}
-
-REGRAS OBRIGATÓRIAS:
-1. Seja breve (máximo 4 frases).
-2. Comece com cumprimento informal, sem "Prezado" ou "Caro".
-3. Faça uma observação verdadeira sobre o estabelecimento usando APENAS as informações acima.
-4. Apresente-se como representante da Sirrus em Maceió.
-5. Termine com UMA pergunta simples e aberta.
-6. NÃO prometa nada, NÃO cite preços, NÃO force uma venda.
-7. NÃO invente informações sobre o estabelecimento.
-8. Use no máximo 1 emoji.
-9. Escreva em português informal mas profissional.`;
-
-    const response = await openai.chat.completions.create({
+    const { message } = await generateApproachMessage({
+      client: openai,
       model: getAiModel(),
-      reasoning_effort: 'low',
-      messages: [
-        { role: 'system', content: 'Você é um representante comercial local que escreve mensagens naturais, diretas e não corporativas.' },
-        { role: 'user', content: prompt },
-      ],
-      max_tokens: 300,
-      temperature: 0.7,
+      lead,
+      institutionalText,
+      strategy,
     });
-
-    const message = response.choices[0].message.content;
-    if (!message) throw new Error('Mensagem vazia gerada pela IA.');
 
     await db.insert(activities).values({
       id: crypto.randomUUID(),
