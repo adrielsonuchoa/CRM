@@ -3,6 +3,7 @@ import { settings } from '@/db/schema';
 import { SettingsForm } from './settings-form';
 import { getWorkerStatus } from '@/lib/browser-worker';
 import { getMetaApiStatusConfig } from '@/lib/meta-api';
+import { isRuntimeEnvSet } from '@/lib/runtime-env';
 
 export const metadata = {
   title: 'Configurações | Sirrus CRM',
@@ -14,7 +15,7 @@ export const dynamic = 'force-dynamic';
 export default async function SettingsPage() {
   const result = await db.select().from(settings).limit(1);
   const currentSettings = result[0] ?? null;
-  const openAiConfigured = !!(process.env.OPENAI_API_KEY?.trim());
+  const aiConfigured = isRuntimeEnvSet('OPENROUTER_API_KEY');
 
   const workerStatus = await getWorkerStatus();
   const metaConfig = getMetaApiStatusConfig();
@@ -30,7 +31,7 @@ export default async function SettingsPage() {
 
       <SettingsForm
         initialSettings={currentSettings}
-        openAiConfigured={openAiConfigured}
+        geminiConfigured={aiConfigured}
         initialWorkerStatus={workerStatus}
         initialMetaConfig={metaConfig}
       />

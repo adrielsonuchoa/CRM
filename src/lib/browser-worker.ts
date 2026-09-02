@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import { analyzeLeadAction, generateMessageAction } from '@/app/actions/ai';
 import { discoverGeoapifyPlaces } from '@/lib/prospecting-sources';
 import { enrichLeadWithInstagram, searchInstagramUsernames } from '@/lib/instagram-enrichment';
+import { isAiConfigured } from '@/lib/ai-client';
 
 export type WorkerStatus = {
   status: 'ATIVO' | 'PAUSADO' | 'PROCESSANDO' | 'AGUARDANDO' | 'ERRO' | 'DESCONECTADO';
@@ -264,7 +265,7 @@ export async function checkChromeConnection(): Promise<{
 export async function testWorkerReadiness() {
   const [cdpCheck, s] = await Promise.all([checkChromeConnection(), getSettings()]);
   const configuredTerms = parseJsonList(s?.prospectingSearchTerms).length > 0 || parseJsonList(s?.prospectingSegments).length > 0;
-  const openaiConfigured = !!process.env.OPENAI_API_KEY?.trim();
+  const geminiConfigured = isAiConfigured();
   const instagramEnabled = (parseJsonList(s?.prospectingSources).includes('INSTAGRAM') || (s?.prospectingSources ?? '').toUpperCase().includes('INSTAGRAM'));
 
   return {
@@ -272,7 +273,7 @@ export async function testWorkerReadiness() {
     instagramSession: cdpCheck.connected && !!cdpCheck.username,
     backend: true,
     settings: !!s && configuredTerms,
-    openaiConfigured,
+    openaiConfigured: geminiConfigured,
     message: cdpCheck.connected
       ? 'Worker pronto para pesquisar em modo seguro.'
       : instagramEnabled
@@ -322,7 +323,13 @@ export async function getWorkerStatus(): Promise<WorkerStatus> {
     status: statusMap[rawStatus] ?? 'AGUARDANDO',
     chromeConnected: cdpCheck.connected,
     instagramProfile: cdpCheck.username,
-    automationsActive: cdpCheck.connected && automationsActive,
+    // Antes exigia cdpCheck.connected aqui, o que travava os botoes
+    // Iniciar/Pausar (e deixava a tela parecendo "parada") sempre que a
+    // automacao roda em modo Geoapify-only (sem Chrome), que e um modo
+    // suportado. rawStatus ja trata corretamente o caso sem Chrome (via
+    // isRunningWithoutBrowser acima), entao basta usar automationsActive
+    // como calculado.
+    automationsActive,
     dailyLimit: counter.limit,
     sentToday: counter.count,
     queueSize: Number(queueResult[0]?.count ?? 0),
@@ -377,6 +384,72 @@ export async function startWorker(): Promise<{ success: boolean; message?: strin
   return { success: true, message: 'Automacao iniciada. O progresso sera atualizado nesta tela.' };
 }
 
+// Fila de envio automatico do modo SEMIAUTOMATICO. A "fila" nao e uma tabela
+// separada: e simplesmente todo lead com pipelineStage em
+// QUALIFICADO/PRONTO PARA CONTATO/AGUARDANDO_CONTATO (a mesma definicao ja
+// usada em getWorkerStatus para contar o tamanho da fila). Por isso, quando
+// o envio muda o estagio para CONTATO REALIZADO, o lead sai da fila sozinho;
+// e se o usuario regredir o estagio manualmente de volta para um desses tres,
+// ele volta a aparecer na fila sozinho tambem — sem nenhuma logica extra de
+// "readicionar".
+async function processAutomaticSendQueueOnce() {
+  const s = await getSettings();
+  if ((s?.operationalMode ?? 'ASSISTIDO') !== 'SEMIAUTOMATICO') return;
+
+  const dryRun = s?.prospectionDryRun ?? true;
+  if (dryRun) {
+    // Modo de teste: o worker continua descobrindo e preparando rascunhos de
+    // mensagem (via runProspectingOnce), mas nao envia nada sozinho. Isso
+    // evita reprocessar os mesmos leads a cada ciclo so para regenerar
+    // rascunho, ja que em modo de teste o estagio nunca avanca para tirar o
+    // lead da fila.
+    return;
+  }
+
+  const cdpCheck = await checkChromeConnection();
+  if (!cdpCheck.connected || !cdpCheck.username) {
+    await setWorkerState({ activity: 'Modo semi-automático aguardando Chrome com Instagram conectado para enviar as mensagens da fila.' });
+    return;
+  }
+
+  const counter = await getCounter();
+  if (counter.count >= counter.limit) return;
+
+  const queued = await db
+    .select({ id: leads.id })
+    .from(leads)
+    .where(sql`${leads.pipelineStage} IN ('QUALIFICADO', 'PRONTO PARA CONTATO', 'AGUARDANDO_CONTATO') AND ${leads.doNotContact} = 0 AND ${leads.instagramUsername} IS NOT NULL`)
+    .limit(Math.max(1, counter.limit - counter.count));
+
+  const intervalMs = Math.max(s?.minActionIntervalSeconds ?? 90, 15) * 1000;
+
+  for (const { id: leadId } of queued) {
+    const freshState = await ensureWorkerState();
+    if (freshState.status === 'PAUSADO') break;
+
+    const freshCounter = await getCounter();
+    if (freshCounter.count >= freshCounter.limit) break;
+
+    try {
+      // sendFirstDmViaBrowser prepara e digita a mensagem (mesma funcao usada
+      // no fluxo manual de "Preparar DM"); confirmPreparedDmViaBrowser e quem
+      // efetivamente aperta Enter e atualiza o pipeline para CONTATO
+      // REALIZADO. No fluxo manual, um humano ve o print da conversa entre
+      // essas duas etapas antes de confirmar; no modo semi-automatico as duas
+      // etapas sao encadeadas sem essa revisao, pois o objetivo aqui e
+      // exatamente o envio nao supervisionado.
+      const prepared = await sendFirstDmViaBrowser(leadId);
+      if (prepared.success && prepared.prepared && !prepared.dryRun && prepared.message) {
+        await confirmPreparedDmViaBrowser(leadId, prepared.message);
+      }
+    } catch (err: any) {
+      console.error('[ERROR] Envio automatico falhou para lead', leadId, err?.message ?? err);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 async function runWorkerLoop() {
   const intervalMs = Math.max(Number(process.env.BROWSER_WORKER_INTERVAL_MS ?? 60000), 15000);
 
@@ -395,6 +468,15 @@ async function runWorkerLoop() {
       continue;
     }
 
+    try {
+      await processAutomaticSendQueueOnce();
+    } catch (err: any) {
+      console.error('[ERROR] Falha no ciclo de envio automatico:', err?.message ?? err);
+    }
+
+    const postSendState = await ensureWorkerState();
+    if (postSendState.status === 'PAUSADO') return { success: true, message: 'Automacao pausada.' };
+
     await setWorkerState({
       status: 'AGUARDANDO',
       activity: `Proxima busca em ${Math.round(intervalMs / 1000)} segundos`,
@@ -403,13 +485,27 @@ async function runWorkerLoop() {
   }
 }
 
+function sanitizeInstagramUsername(value: string | null | undefined) {
+  if (!value) return null;
+
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const withoutAt = raw.replace(/^@/, '');
+  const withoutBaseUrl = withoutAt.replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '').replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
+  const normalized = withoutBaseUrl.split(/[/?#]/)[0].trim();
+
+  if (!normalized || !/^[a-zA-Z0-9._]+$/.test(normalized)) return null;
+  return normalized.toLowerCase();
+}
+
 function getInstagramUsernameFromUrl(url: string | null | undefined) {
   if (!url) return null;
   try {
     const parsed = new URL(url);
     const segments = parsed.pathname.split('/').filter(Boolean);
     if (!segments.length) return null;
-    const firstSegment = segments[0].replace(/^@/, '').trim();
+    const firstSegment = sanitizeInstagramUsername(segments[0]);
     const ignored = new Set(['accounts', 'explore', 'reels', 'p', 'direct', 'stories', 'tags', 'about', 'privacy', 'terms', 'login', 'signup']);
     if (!firstSegment || ignored.has(firstSegment.toLowerCase())) return null;
     return firstSegment;
@@ -434,9 +530,9 @@ function hasInstagramGuardPage(content: string) {
 }
 
 async function createCandidate(username: string, term: string, city: string | null, segment: string | null, representativeUsername?: string | null) {
-  const cleanUsername = username.replace(/^@/, '').trim().toLowerCase();
+  const cleanUsername = sanitizeInstagramUsername(username);
   if (!cleanUsername || cleanUsername.length < 2) return null;
-  const configuredUsername = (representativeUsername || process.env.INSTAGRAM_USERNAME)?.replace(/^@/, '').trim().toLowerCase();
+  const configuredUsername = sanitizeInstagramUsername(representativeUsername || process.env.INSTAGRAM_USERNAME);
   if (configuredUsername && cleanUsername === configuredUsername) return null;
 
   const existing = await db.select({ id: leads.id }).from(leads).where(eq(leads.instagramUsername, cleanUsername)).limit(1);
@@ -756,13 +852,13 @@ export type DmPreparationResult = {
 
 export async function previewInstagramProfileViaBrowser(leadId: string): Promise<{ success: boolean; error?: string; screenshot?: string }> {
   const lead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
-  if (!lead?.instagramUsername) return { success: false, error: 'Este lead não possui Instagram confirmado.' };
+  const username = sanitizeInstagramUsername(lead?.instagramUsername);
+  if (!username) return { success: false, error: 'Este lead não possui Instagram confirmado ou o valor está inválido.' };
 
   let backgroundBrowser: Browser | undefined;
   try {
     const background = await createBackgroundInstagramPage();
     backgroundBrowser = background.browser;
-    const username = lead.instagramUsername.replace(/^@/, '').trim();
     await background.page.goto(`https://www.instagram.com/${username}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await background.page.waitForTimeout(2500);
     const bodyText = await background.page.locator('body').innerText().catch(() => '');
@@ -790,16 +886,21 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
   let lead = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
   if (!lead) return { success: false, error: 'Lead nao encontrado.' };
   if (lead.doNotContact) return { success: false, error: 'Lead marcado como NAO CONTATAR.' };
-  if (!lead.instagramUsername) {
+
+  const sanitizedLeadUsername = sanitizeInstagramUsername(lead.instagramUsername);
+  if (!sanitizedLeadUsername) {
     const enriched = await enrichLeadViaBrowser(leadId);
     if (!enriched.success) {
-      return { success: false, error: enriched.error ?? 'Lead nao possui usuario de Instagram. Use "Buscar Instagram" antes de enviar.' };
+      return { success: false, error: enriched.error ?? 'Lead nao possui usuario de Instagram válido. Use "Buscar Instagram" antes de enviar.' };
     }
     const refreshed = (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0];
-    if (!refreshed?.instagramUsername) {
-      return { success: false, error: 'Lead nao possui usuario de Instagram.' };
+    const refreshedUsername = sanitizeInstagramUsername(refreshed?.instagramUsername);
+    if (!refreshedUsername) {
+      return { success: false, error: 'Lead nao possui usuario de Instagram válido.' };
     }
-    lead = refreshed;
+    lead = { ...refreshed, instagramUsername: refreshedUsername };
+  } else {
+    lead = { ...lead, instagramUsername: sanitizedLeadUsername };
   }
 
   const cdpCheck = await checkChromeConnection();
@@ -881,7 +982,11 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
     browser = background.browser;
     const context = background.context;
     let page = background.page;
-    const cleanUsername = lead.instagramUsername!.replace(/^@/, '').trim();
+    const cleanUsername = sanitizeInstagramUsername(lead.instagramUsername) ?? '';
+    if (!cleanUsername) {
+      await browser.close();
+      return { success: false, error: 'Usuario do Instagram inválido para preparar a conversa.' };
+    }
 
     await page.goto(`https://www.instagram.com/${cleanUsername}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(3000);

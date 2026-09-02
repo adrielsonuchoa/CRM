@@ -118,6 +118,36 @@ REGRAS:
   return { system, user, signals, selectedSignal };
 }
 
+export function isReasoningModel(model: string) {
+  return /gemini-3|gemini-2\.5|gpt-oss|o1|o3|reasoning/i.test(model);
+}
+
+// Modelos Gemini (e outros modelos "reasoning") gastam parte do orçamento de
+// tokens de saída com "thinking" interno antes de escrever a resposta final.
+// Sem controlar isso, o modelo pode consumir quase todo o max_tokens só
+// pensando e devolver a mensagem cortada no meio da frase (e demorar mais
+// para responder). reasoning_effort limita esse gasto.
+// Gemini 2.5 aceita 'none' (desliga o thinking); Gemini 3.x exige no mínimo 'low'.
+export function getReasoningEffort(model: string): 'none' | 'low' | undefined {
+  if (!isReasoningModel(model)) return undefined;
+  if (/gemini-2\.5/i.test(model)) return 'none';
+  return 'low';
+}
+
+export function isApproachMessageComplete(message: string) {
+  const trimmed = message.trim();
+  if (trimmed.length < 80) return false;
+  if (!trimmed.endsWith('?')) return false;
+  return (trimmed.match(/\?/g) ?? []).length === 1;
+}
+
+export function buildFallbackApproachMessage(lead: ApproachLead, selectedSignal?: PersonalizationSignal | null) {
+  const greeting = lead.businessName ? `Oi, ${lead.businessName}!` : 'Oi!';
+  return selectedSignal
+    ? `${greeting} Sou da Sirrus aqui em Maceió. Sei que vocês ${selectedSignal.description} e queria entender melhor essa rotina. Como vocês organizam essa operação hoje?`
+    : `${greeting} Sou da Sirrus aqui em Maceió. Queria entender como vocês fazem hoje a parte de pedidos, comandas e caixa. Vocês usam algum sistema para centralizar essa operação?`;
+}
+
 export function normalizeApproachMessage(message: string, lead?: ApproachLead, selectedSignal?: PersonalizationSignal | null) {
   let normalized = message.trim()
     .replace(/gostaria de saber/gi, 'queria entender')
@@ -139,13 +169,34 @@ export function normalizeApproachMessage(message: string, lead?: ApproachLead, s
       [true, /bem movimentad[oa]|muitos clientes|card[aá]pio (variado|diversificado)/],
     ].some(([invalid, pattern]) => invalid && (pattern as RegExp).test(lower));
     if (unsupported) {
-      const greeting = lead.businessName ? `Oi, ${lead.businessName}!` : 'Oi!';
-      return selectedSignal
-        ? `${greeting} Sou da Sirrus aqui em Maceió. Sei que vocês ${selectedSignal.description} e queria entender melhor essa rotina. Como vocês organizam essa operação hoje?`
-        : `${greeting} Sou da Sirrus aqui em Maceió. Queria entender como vocês fazem hoje a parte de pedidos, comandas e caixa. Vocês usam algum sistema para centralizar essa operação?`;
+      return buildFallbackApproachMessage(lead, selectedSignal);
     }
   }
   return normalized;
+}
+
+async function requestApproachCompletion(args: {
+  client: OpenAI;
+  model: string;
+  system: string;
+  user: string;
+  maxOutputTokens: number;
+}) {
+  const createParams: Record<string, unknown> = {
+    model: args.model,
+    messages: [{ role: 'system', content: args.system }, { role: 'user', content: args.user }],
+    temperature: 0.8,
+  };
+  const reasoningEffort = getReasoningEffort(args.model);
+  if (reasoningEffort) {
+    createParams.reasoning_effort = reasoningEffort;
+  }
+  if (isReasoningModel(args.model)) {
+    createParams.max_completion_tokens = args.maxOutputTokens;
+  } else {
+    createParams.max_tokens = args.maxOutputTokens;
+  }
+  return args.client.chat.completions.create(createParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
 }
 
 export async function generateApproachMessage(args: {
@@ -154,17 +205,43 @@ export async function generateApproachMessage(args: {
   lead: ApproachLead;
   institutionalText: string;
   strategy?: string;
+  fallbackModel?: string;
 }) {
   const prompt = buildApproachPrompt(args.lead, args.institutionalText, args.strategy);
-  const response = await args.client.chat.completions.create({
-    model: args.model,
-    reasoning_effort: 'low',
-    messages: [{ role: 'system', content: prompt.system }, { role: 'user', content: prompt.user }],
-    max_tokens: 400,
-    temperature: 0.8,
-  });
-  const rawMessage = response.choices[0]?.message.content?.trim();
-  const message = rawMessage ? normalizeApproachMessage(rawMessage, args.lead, prompt.selectedSignal) : '';
-  if (!message) throw new Error('Mensagem vazia gerada pela IA.');
-  return { message, prompt, usage: response.usage };
+  const models = [...new Set([
+    args.model,
+    ...(args.fallbackModel && args.fallbackModel !== args.model ? [args.fallbackModel] : []),
+  ])];
+
+  let lastUsage: OpenAI.Completions.CompletionUsage | undefined;
+  for (const model of models) {
+    const maxOutputTokens = isReasoningModel(model) ? 4096 : 512;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await requestApproachCompletion({
+        client: args.client,
+        model,
+        system: prompt.system,
+        user: prompt.user,
+        maxOutputTokens: attempt === 0 ? maxOutputTokens : maxOutputTokens * 2,
+      });
+      const choice = response.choices[0];
+      lastUsage = response.usage;
+      const finishReason = choice?.finish_reason;
+      if (finishReason && finishReason !== 'stop') {
+        console.warn('[AI] generateApproachMessage finish_reason:', finishReason, 'model:', model, 'attempt:', attempt + 1);
+      }
+      const rawMessage = choice?.message.content?.trim();
+      const message = rawMessage ? normalizeApproachMessage(rawMessage, args.lead, prompt.selectedSignal) : '';
+      if (message && isApproachMessageComplete(message) && finishReason === 'stop') {
+        return { message, prompt, usage: response.usage };
+      }
+      if (message && isApproachMessageComplete(message)) {
+        return { message, prompt, usage: response.usage };
+      }
+    }
+  }
+
+  const fallbackMessage = buildFallbackApproachMessage(args.lead, prompt.selectedSignal);
+  console.warn('[AI] generateApproachMessage using fallback template after incomplete generations');
+  return { message: fallbackMessage, prompt, usage: lastUsage };
 }

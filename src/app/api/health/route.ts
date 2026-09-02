@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getMetaApiStatusConfig } from '@/lib/meta-api';
 import { getWorkerStatus } from '@/lib/browser-worker';
+import { isRuntimeEnvSet } from '@/lib/runtime-env';
 
 export async function GET() {
   const meta = getMetaApiStatusConfig();
@@ -15,7 +16,7 @@ export async function GET() {
 
   return NextResponse.json({
     app: true,
-    openaiConfigured: !!process.env.OPENAI_API_KEY?.trim(),
+    aiConfigured: isRuntimeEnvSet('OPENROUTER_API_KEY'),
     metaConfigured: meta.configured,
     workerAvailable,
   });

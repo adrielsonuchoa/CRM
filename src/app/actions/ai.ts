@@ -1,27 +1,13 @@
 'use server';
 
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 import { z } from 'zod';
 import { db } from '@/db';
 import { activities, leads, settings } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import crypto from 'crypto';
-import { generateApproachMessage } from '@/lib/approach-message';
-
-function getOpenAI() {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY não configurada. Adicione a chave no arquivo .env para usar funcionalidades de IA.');
-  }
-  return new OpenAI({
-    apiKey,
-    baseURL: process.env.OPENAI_BASE_URL || (apiKey.startsWith('gsk_') ? 'https://api.groq.com/openai/v1' : undefined),
-  });
-}
-
-function getAiModel() {
-  return process.env.OPENAI_MODEL || (process.env.OPENAI_API_KEY?.trim().startsWith('gsk_') ? 'openai/gpt-oss-20b' : 'gpt-4o-mini');
-}
+import { generateApproachMessage, getReasoningEffort, isReasoningModel } from '@/lib/approach-message';
+import { getOpenAIClient as getOpenAI, getAiModel, getMessageModel } from '@/lib/ai-client';
 
 const ScoreSchema = z.object({
   score: z.number().describe('Pontuação de 0 a 100.'),
@@ -151,17 +137,31 @@ Informações institucionais da Sirrus: ${((await db.select().from(settings).lim
     // Call IA with 30-second timeout
     let rawContent: string | null = null;
     try {
+      const scoreModel = getAiModel();
+      const scoreParams: Record<string, unknown> = {
+        model: scoreModel,
+        messages: [
+          { role: 'system', content: 'Você é um especialista em vendas da Sirrus, sistemas de gestão para food service. Nunca invente dados não fornecidos. Responda em JSON válido correspondente ao schema do lead.' },
+          { role: 'user', content: prompt + '\n\nRetorne a resposta estritamente no formato JSON com as chaves: score (número 0-100), qualification ("ALTA PRIORIDADE" | "BOA OPORTUNIDADE" | "MÉDIA PRIORIDADE" | "BAIXA PRIORIDADE"), reasons (array de strings), possibleNeeds (array de strings: PDV, comandas, mesas, estoque, delivery), confidence (número 0.0-1.0), summary (string).' },
+        ],
+        response_format: { type: 'json_object' },
+      };
+      // Modelos "reasoning" (ex.: Gemini 3.x/2.5) gastam tokens de saída com
+      // "thinking" interno antes de escrever o JSON final. Sem limitar isso
+      // com reasoning_effort, o modelo pode consumir a maior parte do
+      // orçamento pensando e devolver a resposta cortada, além de demorar
+      // mais para responder.
+      const scoreReasoningEffort = getReasoningEffort(scoreModel);
+      if (scoreReasoningEffort) scoreParams.reasoning_effort = scoreReasoningEffort;
+      if (isReasoningModel(scoreModel)) {
+        scoreParams.max_completion_tokens = 2048;
+      } else {
+        scoreParams.max_tokens = 2048;
+      }
+
       const response = await withTimeout(
-        openai.chat.completions.create({
-          model: getAiModel(),
-          reasoning_effort: 'low',
-          messages: [
-            { role: 'system', content: 'Você é um especialista em vendas da Sirrus, sistemas de gestão para food service. Nunca invente dados não fornecidos. Responda em JSON válido correspondente ao schema do lead.' },
-            { role: 'user', content: prompt + '\n\nRetorne a resposta estritamente no formato JSON com as chaves: score (número 0-100), qualification ("ALTA PRIORIDADE" | "BOA OPORTUNIDADE" | "MÉDIA PRIORIDADE" | "BAIXA PRIORIDADE"), reasons (array de strings), possibleNeeds (array de strings: PDV, comandas, mesas, estoque, delivery), confidence (número 0.0-1.0), summary (string).' },
-          ],
-          response_format: { type: 'json_object' },
-        }),
-        30000 // 30-second timeout
+        openai.chat.completions.create(scoreParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming),
+        40000 // 40-second timeout (folga para latencia de rede + compilacao a frio do Next dev)
       );
       rawContent = response.choices[0].message.content;
     } catch (timeoutErr: any) {
@@ -293,13 +293,17 @@ export async function generateMessageAction(leadId: string, strategy: string = '
     const settingsRecord = await db.select().from(settings).limit(1);
     const institutionalText = settingsRecord[0]?.institutionalText?.trim() || 'Não configurado.';
 
-    const { message } = await generateApproachMessage({
-      client: openai,
-      model: getAiModel(),
-      lead,
-      institutionalText,
-      strategy,
-    });
+    const { message } = await withTimeout(
+      generateApproachMessage({
+        client: openai,
+        model: getMessageModel(),
+        fallbackModel: getAiModel(),
+        lead,
+        institutionalText,
+        strategy,
+      }),
+      45000, // ampliado de 25s: sobra para o retry interno (2 tentativas) + latencia de rede
+    );
 
     await db.insert(activities).values({
       id: crypto.randomUUID(),
@@ -379,14 +383,24 @@ Retorne estritamente um JSON no seguinte formato:
   "reason": "breve justificativa da escolha ou rejeição"
 }`;
 
-    const response = await openai.chat.completions.create({
-      model: getAiModel(),
+    const disambiguateModel = getAiModel();
+    const disambiguateParams: Record<string, unknown> = {
+      model: disambiguateModel,
       messages: [
         { role: 'system', content: 'Você é um assistente analista de dados especializado em validação de leads no CRM. Seja extremamente rigoroso para evitar falsos positivos.' },
         { role: 'user', content: prompt }
       ],
       response_format: { type: 'json_object' }
-    });
+    };
+    const disambiguateReasoningEffort = getReasoningEffort(disambiguateModel);
+    if (disambiguateReasoningEffort) disambiguateParams.reasoning_effort = disambiguateReasoningEffort;
+    if (isReasoningModel(disambiguateModel)) {
+      disambiguateParams.max_completion_tokens = 1024;
+    } else {
+      disambiguateParams.max_tokens = 1024;
+    }
+
+    const response = await openai.chat.completions.create(disambiguateParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
 
     const rawContent = response.choices[0].message.content;
     if (!rawContent) {

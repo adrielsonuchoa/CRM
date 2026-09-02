@@ -78,15 +78,17 @@ function getGoogleMapsSearchUrl(name: string, address: string | null) {
 
 function getInstagramUsername(value: string | null | undefined) {
   if (!value) return null;
-  try {
-    const url = new URL(value);
-    if (!url.hostname.toLowerCase().includes('instagram.com')) return null;
-    const username = url.pathname.split('/').filter(Boolean)[0]?.replace(/^@/, '').toLowerCase();
-    if (!username || ['p', 'reel', 'reels', 'explore', 'accounts', 'direct'].includes(username)) return null;
-    return /^[a-z0-9._]+$/.test(username) ? username : null;
-  } catch {
-    return null;
-  }
+
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const withoutAt = raw.replace(/^@/, '');
+  const withoutBaseUrl = withoutAt
+    .replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '')
+    .replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
+  const username = withoutBaseUrl.split(/[/?#]/)[0].trim();
+  if (!username || ['p', 'reel', 'reels', 'explore', 'accounts', 'direct'].includes(username.toLowerCase())) return null;
+  return /^[a-z0-9._]+$/.test(username) ? username.toLowerCase() : null;
 }
 
 export async function findInstagramOnWebsite(website: string | null | undefined) {
@@ -168,6 +170,15 @@ async function createGeoapifyLead(place: GeoapifyPlace, city: string | null, seg
   return { leadId, duplicate: false };
 }
 
+// Tamanho de página usado nas requisições ao Geoapify. O plano usado neste
+// projeto aceita até 20 resultados por chamada.
+const GEOAPIFY_PAGE_SIZE = 20;
+// Quantas páginas (de GEOAPIFY_PAGE_SIZE resultados cada) podemos avançar por
+// termo de busca antes de desistir daquele termo. Isso limita o custo/tempo
+// de uma execução mesmo que o termo tenha centenas de resultados e o CRM já
+// conheça os primeiros de todos eles.
+const GEOAPIFY_MAX_PAGES_PER_TERM = 15;
+
 export async function discoverGeoapifyPlaces(config: ProspectingSettings): Promise<DiscoveryResult> {
   const apiKey = process.env.GEOAPIFY_API_KEY?.trim();
   if (!apiKey) return { leadIds: [], found: 0, created: 0, duplicates: 0, errors: ['GEOAPIFY_API_KEY não configurada.'] };
@@ -194,8 +205,21 @@ export async function discoverGeoapifyPlaces(config: ProspectingSettings): Promi
     return { leadIds, found, created: leadIds.length, duplicates, errors: [`Geoapify geocoding: ${geocodeData.error?.message ?? 'cidade não localizada.'}`] };
   }
 
+  // Antes: a condição de parada (`found >= limit`) contava TODO resultado
+  // devolvido pelo Geoapify, inclusive os que já existiam no CRM
+  // (duplicados). E cada chamada pedia sempre os resultados a partir do
+  // início (sem `offset`), então toda execução repetia exatamente os mesmos
+  // estabelecimentos mais bem rankeados — que, depois das primeiras
+  // execuções, já eram todos duplicados. Resultado: aumentar o "limite de
+  // busca" nas configurações não tinha efeito nenhum, porque o loop nunca
+  // avançava para além da primeira página de cada termo.
+  //
+  // Agora: paginamos de verdade via `offset` (suportado pela Places API do
+  // Geoapify) até encontrar leads novos suficientes para atingir `limit`,
+  // até esgotar os resultados do termo, ou até um limite de segurança de
+  // páginas por termo (GEOAPIFY_MAX_PAGES_PER_TERM).
   for (const term of terms) {
-    if (found >= limit) break;
+    if (leadIds.length >= limit) break;
     const category = /pizzaria|hamburgueria|restaurante/i.test(term)
       ? 'catering.restaurant'
       : /cafeteria|cafe/i.test(term)
@@ -203,30 +227,41 @@ export async function discoverGeoapifyPlaces(config: ProspectingSettings): Promi
         : /bar/i.test(term)
           ? 'catering.bar'
           : 'catering.restaurant,catering.cafe,catering.bar';
-    const params = new URLSearchParams({
-      categories: category,
-      filter: `circle:${coordinates.lon},${coordinates.lat},20000`,
-      bias: `proximity:${coordinates.lon},${coordinates.lat}`,
-      limit: String(Math.min(limit - found, 20)),
-      apiKey,
-    });
-    const response = await fetch(`https://api.geoapify.com/v2/places?${params.toString()}`, {
-      signal: AbortSignal.timeout(20000),
-    }).catch((error) => ({ ok: false, status: 0, json: async () => ({ features: [], error: { message: error?.message ?? 'Falha de rede' } }) }));
 
-    const data = await response.json() as { features?: Array<{ properties?: GeoapifyPlace }>; error?: { message?: string } };
-    if (!response.ok) {
-      errors.push(`Geoapify (${term}): ${data.error?.message ?? `HTTP ${response.status}`}`);
-      continue;
-    }
+    let offset = 0;
+    for (let page = 0; page < GEOAPIFY_MAX_PAGES_PER_TERM && leadIds.length < limit; page++) {
+      const params = new URLSearchParams({
+        categories: category,
+        filter: `circle:${coordinates.lon},${coordinates.lat},20000`,
+        bias: `proximity:${coordinates.lon},${coordinates.lat}`,
+        limit: String(GEOAPIFY_PAGE_SIZE),
+        offset: String(offset),
+        apiKey,
+      });
+      const response = await fetch(`https://api.geoapify.com/v2/places?${params.toString()}`, {
+        signal: AbortSignal.timeout(20000),
+      }).catch((error) => ({ ok: false, status: 0, json: async () => ({ features: [], error: { message: error?.message ?? 'Falha de rede' } }) }));
 
-    for (const feature of data.features ?? []) {
-      if (found >= limit) break;
-      found++;
-      const result = await createGeoapifyLead(feature.properties ?? {}, city, segments[0] ?? null, term);
-      if (result.duplicate) duplicates++;
-      if (result.leadId) leadIds.push(result.leadId);
-      if (result.invalid) errors.push(`Geoapify (${term}): resultado sem nome ignorado.`);
+      const data = await response.json() as { features?: Array<{ properties?: GeoapifyPlace }>; error?: { message?: string } };
+      if (!response.ok) {
+        errors.push(`Geoapify (${term}): ${data.error?.message ?? `HTTP ${response.status}`}`);
+        break;
+      }
+
+      const features = data.features ?? [];
+      if (features.length === 0) break; // sem mais resultados para este termo
+
+      for (const feature of features) {
+        if (leadIds.length >= limit) break;
+        found++;
+        const result = await createGeoapifyLead(feature.properties ?? {}, city, segments[0] ?? null, term);
+        if (result.duplicate) duplicates++;
+        if (result.leadId) leadIds.push(result.leadId);
+        if (result.invalid) errors.push(`Geoapify (${term}): resultado sem nome ignorado.`);
+      }
+
+      offset += features.length;
+      if (features.length < GEOAPIFY_PAGE_SIZE) break; // última página deste termo
     }
   }
 

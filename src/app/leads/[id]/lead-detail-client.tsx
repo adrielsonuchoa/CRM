@@ -50,7 +50,16 @@ function normalizePhone(phone: string | null) {
 
 function normalizeInstagram(ig: string | null) {
   if (!ig) return null;
-  return ig.replace(/^@/, '');
+
+  const raw = String(ig).trim();
+  const withoutAt = raw.replace(/^@/, '');
+  const withoutBaseUrl = withoutAt
+    .replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '')
+    .replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
+  const normalized = withoutBaseUrl.split(/[/?#]/)[0].trim();
+
+  if (!normalized || !/^[a-zA-Z0-9._]+$/.test(normalized)) return null;
+  return normalized.toLowerCase();
 }
 
 type Lead = {

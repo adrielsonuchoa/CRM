@@ -1,22 +1,21 @@
+import type OpenAI from 'openai';
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { db } from '@/db';
 import { activities, leads, settings, webhookEvents } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { sendInstagramMessageViaApi } from '@/lib/meta-api';
-import OpenAI from 'openai';
+import { getOpenAIClient, getAiModel, isAiConfigured } from '@/lib/ai-client';
+import { getReasoningEffort, isReasoningModel } from '@/lib/approach-message';
 
+// Este arquivo usava sua PRÓPRIA cópia da configuração da IA (apontando
+// direto para o Gemini com GEMINI_API_KEY), separada da usada em ai.ts. Isso
+// fez com que, ao migrar para o OpenRouter, a resposta automática sugerida
+// aqui continuasse quebrada mesmo depois da troca — corrigido usando o
+// mesmo cliente compartilhado (@/lib/ai-client).
 function getOpenAI() {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) return null;
-  return new OpenAI({
-    apiKey,
-    baseURL: process.env.OPENAI_BASE_URL || (apiKey.startsWith('gsk_') ? 'https://api.groq.com/openai/v1' : undefined),
-  });
-}
-
-function getAiModel() {
-  return process.env.OPENAI_MODEL || (process.env.OPENAI_API_KEY?.trim().startsWith('gsk_') ? 'openai/gpt-oss-20b' : 'gpt-4o-mini');
+  if (!isAiConfigured()) return null;
+  return getOpenAIClient();
 }
 
 function safeEqual(a: string, b: string) {
@@ -148,9 +147,9 @@ async function handleInboundMessage(senderId: string, senderUsername: string | u
   const openai = getOpenAI();
   if (openai) {
     try {
-      const aiRes = await openai.chat.completions.create({
-        model: getAiModel(),
-        reasoning_effort: 'low',
+      const replyModel = getAiModel();
+      const replyParams: Record<string, unknown> = {
+        model: replyModel,
         messages: [
           {
             role: 'system',
@@ -161,9 +160,20 @@ async function handleInboundMessage(senderId: string, senderUsername: string | u
             content: `Lead: ${existingLead.businessName}\nMensagem recebida: ${messageText}\nGere uma resposta sugerida curta, cordial e revisavel pelo usuario antes do envio.`,
           },
         ],
-        max_tokens: 200,
-      });
-      suggestedReply = aiRes.choices[0].message.content || '';
+      };
+      // Mesmo cuidado do ai.ts: modelos "reasoning" gastam parte do
+      // orcamento de tokens de saida pensando internamente antes de
+      // escrever a resposta. Sem isso, a resposta sugerida pode sair
+      // cortada no meio da frase.
+      const replyReasoningEffort = getReasoningEffort(replyModel);
+      if (replyReasoningEffort) replyParams.reasoning_effort = replyReasoningEffort;
+      if (isReasoningModel(replyModel)) {
+        replyParams.max_completion_tokens = 512;
+      } else {
+        replyParams.max_tokens = 200;
+      }
+      const aiRes = await openai.chat.completions.create(replyParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
+      suggestedReply = aiRes.choices[0]?.message?.content || '';
     } catch (err: any) {
       console.error('[ERROR] Erro ao gerar resposta sugerida:', err?.message ?? err);
     }

@@ -77,12 +77,12 @@ type MetaStatusState = {
 
 export function SettingsForm({
   initialSettings,
-  openAiConfigured,
+  geminiConfigured,
   initialWorkerStatus,
   initialMetaConfig,
 }: {
   initialSettings: SettingsData | null;
-  openAiConfigured: boolean;
+  geminiConfigured: boolean;
   initialWorkerStatus: WorkerStatusState;
   initialMetaConfig: { configured: boolean; webhookActive: boolean; hasToken: boolean };
 }) {
@@ -453,49 +453,23 @@ export function SettingsForm({
       <section className="space-y-6">
         <div className="flex items-center gap-2">
           <BrainCircuit className="w-5 h-5 text-blue-600" />
-          <h2 className="text-xl font-semibold">Inteligência Artificial (OpenAI)</h2>
+          <h2 className="text-xl font-semibold">Inteligência Artificial (OpenRouter)</h2>
         </div>
         <Separator />
 
         <div className="rounded-lg border p-4 space-y-2">
           <div className="flex items-center gap-2">
             <KeyRound className="w-4 h-4 text-neutral-500" />
-            <span className="font-medium text-sm">OpenAI API Key</span>
-            {openAiConfigured
+            <span className="font-medium text-sm">OpenRouter API Key</span>
+            {geminiConfigured
               ? <Badge className="bg-green-100 text-green-800 border-green-200 dark:bg-green-950/30 dark:text-green-300">✓ Configurada</Badge>
               : <Badge variant="destructive">Não Configurada</Badge>}
           </div>
           <p className="text-xs text-neutral-500">
-            A chave de API é lida do arquivo <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">.env</code> como <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">OPENAI_API_KEY</code>.
+            A chave de API é lida do arquivo <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">.env</code> como <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">OPENROUTER_API_KEY</code>. Modelo atual: <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">google/gemini-3.5-flash-lite</code> via OpenRouter.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label htmlFor="aiAnalysisModel">Modelo para Análise</Label>
-            <select
-              id="aiAnalysisModel"
-              name="aiAnalysisModel"
-              defaultValue={s?.aiAnalysisModel ?? 'gpt-4o-mini'}
-              className="w-full border border-neutral-200 dark:border-neutral-700 rounded-md px-3 py-2 bg-white dark:bg-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="gpt-4o-mini">gpt-4o-mini (Econômico)</option>
-              <option value="gpt-4o">gpt-4o (Avançado)</option>
-            </select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="aiMessageModel">Modelo para Mensagens</Label>
-            <select
-              id="aiMessageModel"
-              name="aiMessageModel"
-              defaultValue={s?.aiMessageModel ?? 'gpt-4o-mini'}
-              className="w-full border border-neutral-200 dark:border-neutral-700 rounded-md px-3 py-2 bg-white dark:bg-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="gpt-4o-mini">gpt-4o-mini (Econômico)</option>
-              <option value="gpt-4o">gpt-4o (Avançado)</option>
-            </select>
-          </div>
-        </div>
       </section>
 
       {/* Section: Prospecting */}
@@ -523,6 +497,42 @@ export function SettingsForm({
           <h2 className="text-xl font-semibold">Criterios avancados de prospeccao</h2>
         </div>
         <Separator />
+        <div className="space-y-2 rounded-md border p-3">
+          <Label>Modo operacional</Label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm cursor-pointer">
+              <input
+                type="radio"
+                name="operationalMode"
+                value="ASSISTIDO"
+                defaultChecked={(s?.operationalMode ?? 'ASSISTIDO') === 'ASSISTIDO'}
+                className="h-4 w-4 mt-0.5"
+              />
+              <span>
+                <span className="font-medium">Assistido</span>
+                <br />
+                <span className="text-xs text-neutral-500">Descobre, analisa e prepara as mensagens. O envio de cada DM continua manual (voce revisa e confirma na fila de prospecção).</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm cursor-pointer">
+              <input
+                type="radio"
+                name="operationalMode"
+                value="SEMIAUTOMATICO"
+                defaultChecked={s?.operationalMode === 'SEMIAUTOMATICO'}
+                className="h-4 w-4 mt-0.5"
+              />
+              <span>
+                <span className="font-medium">Semi-automático</span>
+                <br />
+                <span className="text-xs text-neutral-500">Além de descobrir e analisar, também envia as mensagens sozinho (respeitando o limite diário e o intervalo mínimo definidos abaixo) e atualiza o pipeline. Só volta para a fila se você regredir o estágio do estabelecimento.</span>
+              </span>
+            </label>
+          </div>
+          <p className="text-xs text-neutral-500">
+            O modo semi-automático exige o Chrome aberto e conectado (CDP) com o Instagram autenticado, e só envia mensagens reais quando o MODO DE TESTE abaixo estiver desligado.
+          </p>
+        </div>
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
           <label className="flex items-center gap-2">
             <input type="checkbox" name="prospectionDryRun" defaultChecked={s?.prospectionDryRun ?? true} className="h-4 w-4" />

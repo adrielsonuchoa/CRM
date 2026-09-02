@@ -1,0 +1,30 @@
+[
+  {
+    "strategy": "Consultiva",
+    "iteration": 1,
+    "success": false,
+    "duration": 362,
+    "error": "404 The model `llama-3.1-8b-instant` does not exist or you do not have access to it."
+  },
+  {
+    "strategy": "Consultiva",
+    "iteration": 2,
+    "success": false,
+    "duration": 112,
+    "error": "404 The model `llama-3.1-8b-instant` does not exist or you do not have access to it."
+  },
+  {
+    "strategy": "Consultiva",
+    "iteration": 3,
+    "success": false,
+    "duration": 390,
+    "error": "404 The model `llama-3.1-8b-instant` does not exist or you do not have access to it."
+  },
+  {
+    "strategy": "Consultiva",
+    "iteration": 4,
+    "success": false,
+    "duration": 101,
+    "error": "404 The model `llama-3.1-8b-instant` does not exist or you do not have access to it."
+  }
+]

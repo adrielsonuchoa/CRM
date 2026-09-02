@@ -94,13 +94,26 @@ export function guessInstagramUsernames(businessName: string): string[] {
 }
 
 export async function scrapeInstagramProfile(page: Page, username: string): Promise<InstagramProfileData | null> {
-  const cleanUsername = username.replace(/^@/, '').trim().toLowerCase();
+  const cleanUsername = (() => {
+    const raw = String(username).trim();
+    const withoutAt = raw.replace(/^@/, '');
+    const withoutBaseUrl = withoutAt
+      .replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '')
+      .replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
+    const normalized = withoutBaseUrl.split(/[/?#]/)[0].trim();
+    return normalized && /^[a-zA-Z0-9._]+$/.test(normalized) ? normalized.toLowerCase() : null;
+  })();
   if (!cleanUsername) return null;
 
-  await page.goto(`https://www.instagram.com/${cleanUsername}/`, {
-    waitUntil: 'domcontentloaded',
-    timeout: 30000,
-  });
+  try {
+    await page.goto(`https://www.instagram.com/${cleanUsername}/`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    });
+  } catch (err: any) {
+    console.error(`[SCRAPE] page.goto failed for ${cleanUsername}:`, err?.message);
+    return null;
+  }
   await page.waitForTimeout(2500);
 
   const data = await page.evaluate(() => {
@@ -276,20 +289,31 @@ export async function searchInstagramUsernames(
   ).slice(0, 8);
 
   for (const candidate of fallbackGuesses) {
-    try {
-      await page.goto(`https://www.instagram.com/${candidate}/`, { waitUntil: 'domcontentloaded', timeout: 18000 });
-      await page.waitForTimeout(900);
-      const content = await page.locator('body').innerText({ timeout: 4000 }).catch(() => '');
-      const title = await page.title().catch(() => '');
-      const isLikelyProfile = !!content && !/Log In to Instagram|Entrar no Instagram|Page Not Found|Sorry|This page could not be found|Cadastre-se|temporariamente bloqueada|challenge|captcha/i.test(`${title} ${content}`);
-      if (isLikelyProfile) {
-        directCandidates.add(candidate.toLowerCase());
-        break;
+      const cleanCandidate = (() => {
+        const raw = String(candidate).trim();
+        const withoutAt = raw.replace(/^@/, '');
+        const withoutBaseUrl = withoutAt
+          .replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '')
+          .replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
+        const normalized = withoutBaseUrl.split(/[/?#]/)[0].trim();
+        return normalized && /^[a-zA-Z0-9._]+$/.test(normalized) ? normalized.toLowerCase() : null;
+      })();
+      if (!cleanCandidate) continue;
+
+      try {
+        await page.goto(`https://www.instagram.com/${cleanCandidate}/`, { waitUntil: 'domcontentloaded', timeout: 18000 });
+        await page.waitForTimeout(900);
+        const content = await page.locator('body').innerText({ timeout: 4000 }).catch(() => '');
+        const title = await page.title().catch(() => '');
+        const isLikelyProfile = !!content && !/Log In to Instagram|Entrar no Instagram|Page Not Found|Sorry|This page could not be found|Cadastre-se|temporariamente bloqueada|challenge|captcha/i.test(`${title} ${content}`);
+        if (isLikelyProfile) {
+          directCandidates.add(cleanCandidate);
+          break;
+        }
+      } catch (err: any) {
+        console.warn(`[ENRICHMENT] fallback guess failed for ${cleanCandidate}:`, err?.message);
       }
-    } catch {
-      // ignore and continue with the next candidate
     }
-  }
 
   return Array.from(directCandidates).slice(0, 10);
 }
@@ -542,7 +566,15 @@ export async function enrichLeadWithInstagram(
 
   // 1. Existing Username
   if (lead.instagramUsername) {
-    const clean = lead.instagramUsername.replace(/^@/, '').trim().toLowerCase();
+    const clean = (() => {
+      const raw = String(lead.instagramUsername).trim();
+      const withoutAt = raw.replace(/^@/, '');
+      const withoutBaseUrl = withoutAt
+        .replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '')
+        .replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
+      const normalized = withoutBaseUrl.split(/[/?#]/)[0].trim();
+      return normalized && /^[a-zA-Z0-9._]+$/.test(normalized) ? normalized.toLowerCase() : null;
+    })();
     if (clean) {
       candidatesSet.add(clean);
       candidateSources.set(clean, 'existing_username');

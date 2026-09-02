@@ -103,7 +103,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
       newLeads[currentIndex] = updatedLead;
       setLeads(newLeads);
     } else {
-      setError(res.error ?? 'Não foi possível analisar este lead. Verifique se a OpenAI API está configurada.');
+      setError(res.error ?? 'Não foi possível analisar este lead. Verifique se a Gemini API está configurada.');
     }
     setIsAnalyzing(false);
   };
@@ -118,7 +118,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     if (res.success && res.message) {
       setMessage(res.message);
     } else {
-      setError(res.error ?? 'Não foi possível gerar a mensagem. Verifique se a OpenAI API está configurada.');
+      setError(res.error ?? 'Não foi possível gerar a mensagem. Verifique se a Gemini API está configurada.');
     }
     setIsGenerating(false);
   };
@@ -240,7 +240,16 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   try {
     if (currentLead?.painPoints) painPoints = JSON.parse(currentLead.painPoints);
   } catch {}
-  const normalizedInstagram = currentLead?.instagramUsername?.replace(/^@/, '') ?? null;
+  const normalizedInstagram = (() => {
+    if (!currentLead?.instagramUsername) return null;
+    const raw = String(currentLead.instagramUsername).trim();
+    const withoutAt = raw.replace(/^@/, '');
+    const withoutBaseUrl = withoutAt
+      .replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '')
+      .replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
+    const normalized = withoutBaseUrl.split(/[/?#]/)[0].trim();
+    return normalized && /^[a-zA-Z0-9._]+$/.test(normalized) ? normalized.toLowerCase() : null;
+  })();
 
   if (isEmpty) {
     return (
