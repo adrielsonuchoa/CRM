@@ -218,6 +218,18 @@ export async function checkChromeConnection(): Promise<{
 }> {
   const cdpUrl = process.env.CHROME_CDP_URL || 'http://localhost:9222';
 
+  // A Vercel Function nao tem um Chrome persistente nem CDP local. Nao
+  // tente abrir um navegador nesse ambiente: o worker de browser deve rodar
+  // no processo local/servidor dedicado, enquanto a aplicacao web continua
+  // podendo consultar o dashboard normalmente.
+  if (process.env.VERCEL === '1') {
+    return {
+      connected: false,
+      username: null,
+      error: 'Browser worker executa fora da Vercel; Chrome CDP indisponivel neste ambiente.',
+    };
+  }
+
   if (!process.env.CHROME_CDP_URL && !process.env.CHROME_USER_DATA_DIR) {
     // Do not fail early when no env var is set. The user may be running Chrome
     // with the default local CDP port already active, which is the intended flow
