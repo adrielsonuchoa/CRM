@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { db } from '@/db';
@@ -9,6 +9,26 @@ import { analyzeLeadAction, generateMessageAction } from '@/app/actions/ai';
 import { discoverGeoapifyPlaces } from '@/lib/prospecting-sources';
 import { enrichLeadWithInstagram, searchInstagramUsernames } from '@/lib/instagram-enrichment';
 import { isAiConfigured } from '@/lib/ai-client';
+
+// O pacote 'playwright' so pode ser carregado sob demanda: um import
+// estatico no topo do arquivo quebra qualquer rota da Vercel que importe
+// este modulo (mesmo sem nunca chamar chromium.*), porque o bundle da
+// funcao serverless nao inclui os arquivos internos do playwright-core
+// (ex.: coreBundle.js/browsers.json). Por isso o import e feito de forma
+// preguicosa aqui, e bloqueado explicitamente quando rodando na Vercel.
+async function getChromium() {
+  const { chromium } = await import('playwright');
+  return chromium;
+}
+
+function assertBrowserAutomationAvailable() {
+  if (process.env.VERCEL === '1') {
+    throw new Error(
+      'Automacao de navegador (Playwright/Chrome CDP) nao esta disponivel neste ambiente (Vercel). '
+      + 'Rode o worker localmente ou em um servidor dedicado com "npm run worker".'
+    );
+  }
+}
 
 export type WorkerStatus = {
   status: 'ATIVO' | 'PAUSADO' | 'PROCESSANDO' | 'AGUARDANDO' | 'ERRO' | 'DESCONECTADO';
@@ -44,6 +64,8 @@ let workerPreviewScreenshot: string | null = null;
 const preparedDmPages = new Map<string, { page: Page; browser: Browser }>();
 
 async function createBackgroundInstagramPage() {
+  assertBrowserAutomationAvailable();
+  const chromium = await getChromium();
   const sessionBrowser = await getBrowserConnection();
   const sessionContext = await ensureBrowserContext(sessionBrowser);
   const storageState = await sessionContext.storageState();
@@ -95,6 +117,8 @@ async function getBrowserPages(browser: Browser | BrowserContext) {
 async function getBrowserConnection() {
   if (cdpBrowser?.isConnected?.()) return cdpBrowser;
 
+  assertBrowserAutomationAvailable();
+  const chromium = await getChromium();
   const preferredCdpUrl = process.env.CHROME_CDP_URL?.trim() || 'http://localhost:9222';
 
   if (!cdpConnectionPromise) {
