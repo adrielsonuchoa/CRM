@@ -7,6 +7,8 @@ import { revalidatePath } from 'next/cache';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { importManualLeadsCsv } from '@/lib/prospecting-sources';
+import { requirePermission, AuthError, ForbiddenError } from '@/lib/auth-helpers';
+import { logAudit } from '@/lib/audit-log';
 
 const SettingsSchema = z.object({
   name: z.string().trim().optional(),
@@ -53,6 +55,17 @@ function listToJson(value: string | undefined) {
 
 export async function saveSettingsAction(formData: FormData) {
   try {
+    const user = await requirePermission('SETTINGS_EDIT');
+
+    const csvFile = formData.get('manualLeadCsv');
+    const hasCsv = csvFile instanceof File && csvFile.size > 0;
+    if (hasCsv) {
+      // Importar leads por CSV é uma permissão separada — quem só pode
+      // editar configurações gerais não necessariamente pode importar leads
+      // em massa.
+      await requirePermission('LEADS_IMPORT_CSV');
+    }
+
     const raw = Object.fromEntries(formData.entries()) as Record<string, FormDataEntryValue>;
     raw.prospectingSources = formData.getAll('prospectingSources').map(String).join(',');
     delete raw.manualLeadCsv;
@@ -87,17 +100,32 @@ export async function saveSettingsAction(formData: FormData) {
       await db.insert(settings).values({ id: crypto.randomUUID(), ...data });
     }
 
-    const csv = formData.get('manualLeadCsv');
-    if (csv instanceof File && csv.size > 0) {
-      const csvResult = await importManualLeadsCsv(await csv.text());
+    let csvImportSummary: { created: number; errors: number } | null = null;
+    if (hasCsv && csvFile instanceof File) {
+      const csvResult = await importManualLeadsCsv(await csvFile.text());
       if (csvResult.errors.length > 0 && csvResult.created === 0) {
         return { success: false, error: csvResult.errors[0] };
       }
+      csvImportSummary = { created: csvResult.created, errors: csvResult.errors.length };
     }
+
+    await logAudit({
+      userId: user.id,
+      userName: user.name,
+      action: 'SETTINGS_UPDATED',
+      category: 'SETTINGS',
+      description: csvImportSummary
+        ? `Atualizou as configurações e importou leads via CSV (${csvImportSummary.created} criado(s)).`
+        : 'Atualizou as configurações.',
+      metadata: csvImportSummary ? { csvImport: csvImportSummary } : undefined,
+    });
 
     revalidatePath('/settings');
     return { success: true };
   } catch (error: any) {
+    if (error instanceof AuthError || error instanceof ForbiddenError) {
+      return { success: false, error: error.message };
+    }
     console.error('Error saving settings:', error);
     return { success: false, error: 'Nao foi possivel salvar as configuracoes.' };
   }

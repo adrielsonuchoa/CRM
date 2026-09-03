@@ -8,6 +8,20 @@ import { eq } from 'drizzle-orm';
 import crypto from 'crypto';
 import { generateApproachMessage, getReasoningEffort, isReasoningModel } from '@/lib/approach-message';
 import { getOpenAIClient as getOpenAI, getAiModel, getMessageModel } from '@/lib/ai-client';
+import { requirePermission, AuthError, ForbiddenError } from '@/lib/auth-helpers';
+import { logAudit } from '@/lib/audit-log';
+
+// IMPORTANTE: analyzeLeadAction e generateMessageAction (abaixo) NÃO levam
+// checagem de permissão diretamente — elas são chamadas tanto pela tela de
+// Fila de Prospecção (sessão de usuário via HTTP) QUANTO pelo processo de
+// automação em segundo plano (scripts/browser-worker.ts, rodando fora de
+// qualquer requisição HTTP, sem sessão nenhuma). Colocar requirePermission()
+// direto nelas quebraria a automação inteira, porque auth() depende de um
+// contexto de requisição do Next.js que o worker não tem.
+//
+// Por isso a checagem de permissão fica nos wrappers *Authorized abaixo,
+// que são o que a tela de Fila de Prospecção chama; o worker continua
+// chamando as funções originais, sem checagem, exatamente como antes.
 
 const ScoreSchema = z.object({
   score: z.number().describe('Pontuação de 0 a 100.'),
@@ -160,7 +174,7 @@ Informações institucionais da Sirrus: ${((await db.select().from(settings).lim
       }
 
       const response = await withTimeout(
-        openai.chat.completions.create(scoreParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming),
+        openai.chat.completions.create(scoreParams as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming),
         40000 // 40-second timeout (folga para latencia de rede + compilacao a frio do Next dev)
       );
       rawContent = response.choices[0].message.content;
@@ -400,7 +414,7 @@ Retorne estritamente um JSON no seguinte formato:
       disambiguateParams.max_tokens = 1024;
     }
 
-    const response = await openai.chat.completions.create(disambiguateParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
+    const response = await openai.chat.completions.create(disambiguateParams as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
 
     const rawContent = response.choices[0].message.content;
     if (!rawContent) {
@@ -417,6 +431,61 @@ Retorne estritamente um JSON no seguinte formato:
   } catch (error: any) {
     console.error('Error in disambiguateInstagramCandidates:', error);
     return { matched: false, username: null, confidence: 0, reason: 'error_occurred' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wrappers com checagem de permissão — usar estes a partir de componentes de
+// UI (telas), nunca os de cima diretamente. Ver comentário no topo do
+// arquivo sobre por que analyzeLeadAction/generateMessageAction em si não
+// fazem essa checagem.
+// ---------------------------------------------------------------------------
+
+export async function analyzeLeadActionAuthorized(leadId: string) {
+  try {
+    const user = await requirePermission('AI_ANALYZE_LEAD');
+    const result = await analyzeLeadAction(leadId);
+    if (result.success) {
+      await logAudit({
+        userId: user.id,
+        userName: user.name,
+        action: 'AI_LEAD_ANALYZED',
+        category: 'MESSAGES',
+        entityType: 'LEAD',
+        entityId: leadId,
+        description: `Analisou o lead com IA${result.result ? ` (score ${result.result.score})` : ''}.`,
+      });
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof AuthError || error instanceof ForbiddenError) {
+      return { success: false, error: error.message };
+    }
+    throw error;
+  }
+}
+
+export async function generateMessageActionAuthorized(leadId: string, strategy: string = 'Consultiva') {
+  try {
+    const user = await requirePermission('AI_GENERATE_MESSAGE');
+    const result = await generateMessageAction(leadId, strategy);
+    if (result.success) {
+      await logAudit({
+        userId: user.id,
+        userName: user.name,
+        action: 'AI_MESSAGE_GENERATED',
+        category: 'MESSAGES',
+        entityType: 'LEAD',
+        entityId: leadId,
+        description: `Gerou uma mensagem de abordagem com IA (estratégia: ${strategy}).`,
+      });
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof AuthError || error instanceof ForbiddenError) {
+      return { success: false, error: error.message };
+    }
+    throw error;
   }
 }
 

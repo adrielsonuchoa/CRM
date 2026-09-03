@@ -37,6 +37,12 @@ yarn-error.log*
 # vercel
 .vercel
 
+# banco de dados local (dados reais de leads — nunca deve ir pro git)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

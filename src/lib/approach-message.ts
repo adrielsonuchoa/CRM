@@ -196,7 +196,7 @@ async function requestApproachCompletion(args: {
   } else {
     createParams.max_tokens = args.maxOutputTokens;
   }
-  return args.client.chat.completions.create(createParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
+  return args.client.chat.completions.create(createParams as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
 }
 
 export async function generateApproachMessage(args: {

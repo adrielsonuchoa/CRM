@@ -169,7 +169,7 @@ export function SettingsForm({
     setChromeFeedback(null);
     const res = await testChromeConnectionAction();
     setIsTestingChrome(false);
-    if (res.connected) {
+    if ('connected' in res && res.connected) {
       setChromeFeedback(res.username
         ? `Chrome conectado. Sessão Instagram detectada: @${res.username}.`
         : res.error ?? 'Chrome conectado, mas a sessão do Instagram não foi detectada.');
@@ -177,7 +177,7 @@ export function SettingsForm({
       return;
     }
 
-    if (!res.error) {
+    if (!('error' in res) || !res.error) {
       setChromeFeedback('Busca de empresas em modo seguro sem Chrome CDP. O browser só é necessário para Instagram/Browser.');
       setWorkerStatus((prev) => ({ ...prev, chromeConnected: false, instagramProfile: null }));
       return;
@@ -192,6 +192,10 @@ export function SettingsForm({
     setMetaFeedback(null);
     const res = await testMetaIntegrationAction();
     setIsTestingMeta(false);
+    if (!('status' in res)) {
+      setMetaFeedback(res.error);
+      return;
+    }
     setMetaStatus((prev) => ({
       ...prev,
       tokenStatus: res.status,

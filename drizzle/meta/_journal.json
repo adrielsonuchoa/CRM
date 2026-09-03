@@ -43,6 +43,20 @@
       "when": 1787929200000,
       "tag": "0005_geoapify_default_source",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788366199683,
+      "tag": "0006_redundant_hawkeye",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1788404093380,
+      "tag": "0007_create_audit_logs",
+      "breakpoints": true
     }
   ]
 }

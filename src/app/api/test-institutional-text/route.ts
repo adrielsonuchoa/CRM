@@ -2,12 +2,17 @@ import { db } from '@/db';
 import { settings } from '@/db/schema';
 import { getOpenAIClient, getAiModel, getMessageModel, isAiConfigured } from '@/lib/ai-client';
 import { generateApproachMessage, type ApproachLead } from '@/lib/approach-message';
+import { getCurrentUser } from '@/lib/auth-helpers';
 
 /**
  * Endpoint de diagnóstico TEMPORÁRIO para provar, com uma geração real, se o
  * "Texto Institucional" salvo em Configurações está de fato chegando no
- * prompt da IA. Pode apagar este arquivo (e a pasta test-institutional-text)
- * depois de usar.
+ * prompt da IA.
+ *
+ * RECOMENDADO: apague este arquivo (e a pasta test-institutional-text
+ * inteira) agora que o sistema de autenticação existe — já cumpriu seu
+ * propósito de diagnóstico. Enquanto não for apagado, fica restrito a
+ * SUPER_ADMIN.
  *
  * GET /api/test-institutional-text
  */
@@ -20,6 +25,11 @@ const sampleLead: ApproachLead = {
 };
 
 export async function GET() {
+  const user = await getCurrentUser();
+  if (!user || user.role !== 'SUPER_ADMIN') {
+    return Response.json({ error: 'Não autorizado.' }, { status: 403 });
+  }
+
   if (!isAiConfigured()) {
     return Response.json({ success: false, error: 'OPENROUTER_API_KEY não configurada.' }, { status: 400 });
   }

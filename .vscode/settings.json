@@ -1,0 +1,34 @@
+{
+  "mcp": {
+    "servers": {
+      "context7": {
+        "command": "C:\\Windows\\system32\\cmd.exe",
+        "args": [
+          "/c",
+          "C:\\nvm4w\\nodejs\\npx.cmd",
+          "-y",
+          "@context7/mcp-server"
+        ],
+        "type": "stdio",
+        "env": {}
+      },
+      "codegraph": {
+        "command": "C:\\Windows\\system32\\cmd.exe",
+        "args": [
+          "/c",
+          "C:\\nvm4w\\nodejs\\codegraph.cmd",
+          "mcp"
+        ],
+        "type": "stdio"
+      },
+      "token-cache": {
+        "command": "C:\\nvm4w\\nodejs\\node.exe",
+        "args": [
+          "c:\\Users\\Adrielson\\.vscode\\extensions\\ai-token-optimizer.ai-token-optimize-claude-0.1.1\\dist\\cache-server.js",
+          "c:\\Projetos\\Projeto Vendas\\CRM"
+        ],
+        "type": "stdio"
+      }
+    }
+  }
+}

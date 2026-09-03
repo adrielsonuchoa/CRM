@@ -172,7 +172,7 @@ async function handleInboundMessage(senderId: string, senderUsername: string | u
       } else {
         replyParams.max_tokens = 200;
       }
-      const aiRes = await openai.chat.completions.create(replyParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
+      const aiRes = await openai.chat.completions.create(replyParams as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
       suggestedReply = aiRes.choices[0]?.message?.content || '';
     } catch (err: any) {
       console.error('[ERROR] Erro ao gerar resposta sugerida:', err?.message ?? err);

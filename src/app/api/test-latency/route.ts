@@ -1,12 +1,16 @@
 import { getOpenAIClient, getAiModel, isAiConfigured } from '@/lib/ai-client';
 import { getReasoningEffort, isReasoningModel } from '@/lib/approach-message';
 import { getRuntimeEnv } from '@/lib/runtime-env';
+import { getCurrentUser } from '@/lib/auth-helpers';
 
 /**
  * Endpoint de diagnóstico TEMPORÁRIO para confirmar que a OPENROUTER_API_KEY
  * configurada agora está funcionando de verdade (faz uma chamada real e
  * mínima ao modelo configurado, em vez de só checar se a variável existe).
- * Pode apagar este arquivo (e a pasta test-latency) depois de usar.
+ *
+ * RECOMENDADO: apague este arquivo (e a pasta test-latency inteira) agora
+ * que o sistema de autenticação existe — já cumpriu seu propósito de
+ * diagnóstico. Enquanto não for apagado, fica restrito a SUPER_ADMIN.
  *
  * GET /api/test-latency
  */
@@ -23,6 +27,11 @@ function maskKey(value: string) {
 }
 
 export async function GET() {
+  const user = await getCurrentUser();
+  if (!user || user.role !== 'SUPER_ADMIN') {
+    return Response.json({ error: 'Não autorizado.' }, { status: 403 });
+  }
+
   const rawKey = getRuntimeEnv('OPENROUTER_API_KEY');
   const keyDiagnostic = maskKey(rawKey);
 

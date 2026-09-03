@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { analyzeLeadAction, generateMessageAction } from '@/app/actions/ai';
+import { analyzeLeadActionAuthorized as analyzeLeadAction, generateMessageActionAuthorized as generateMessageAction } from '@/app/actions/ai';
 import { markMessageSent, doNotContactLead, clearAllLeadsAction } from '@/app/actions';
 import { cancelPreparedDmAction, confirmPreparedDmAction, previewInstagramProfileAction, sendFirstDmAction } from '@/app/settings/actions-automation';
 import {

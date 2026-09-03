@@ -3,7 +3,14 @@ import { drizzle } from 'drizzle-orm/libsql';
 import { leads, settings } from './schema';
 import crypto from 'crypto';
 
-const client = createClient({ url: 'file:sqlite.db' });
+// Mesma regra de db/migrate.ts e drizzle.config.ts: se TURSO_DATABASE_URL
+// estiver configurada, usamos o banco remoto (produção/Vercel). Sem isso o
+// seed rodaria sempre contra o arquivo local, mesmo em ambientes já
+// migrados pra Turso — silenciosamente "funcionando" no banco errado.
+const client = createClient({
+  url: process.env.TURSO_DATABASE_URL || process.env.DATABASE_URL || 'file:sqlite.db',
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
 const db = drizzle(client);
 
 async function seed() {

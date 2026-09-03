@@ -3,6 +3,14 @@ import { db } from '@/db';
 import { activities, leads } from '@/db/schema';
 import crypto from 'crypto';
 import { eq } from 'drizzle-orm';
+import { getCurrentUser } from '@/lib/auth-helpers';
+
+// Endpoint utilitário que insere leads reais fixos no banco, sem nenhuma
+// checagem além desta — achado durante a auditoria de segurança junto com
+// os outros endpoints de teste (mesma classe de risco: mutação de dados sem
+// permissão granular). RECOMENDADO: apague este arquivo (e a pasta
+// seed-real-restaurants inteira) se não for mais necessário. Enquanto não
+// for apagado, fica restrito a SUPER_ADMIN.
 
 const prospects = [
   { name: 'Mercatto Restaurante e Pizzaria', username: 'pizzaria_mercatto', city: 'Maceió', category: 'Restaurante' },
@@ -20,6 +28,11 @@ const prospects = [
 ];
 
 export async function GET() {
+  const user = await getCurrentUser();
+  if (!user || user.role !== 'SUPER_ADMIN') {
+    return NextResponse.json({ error: 'Não autorizado.' }, { status: 403 });
+  }
+
   let created = 0;
   let skipped = 0;
 

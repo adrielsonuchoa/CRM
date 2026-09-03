@@ -49,6 +49,11 @@ export const leads = sqliteTable('leads', {
   doNotContact: integer('do_not_contact', { mode: 'boolean' }).default(false),
   conversationProvider: text('conversation_provider').default('BROWSER'), // BROWSER | META_API | MANUAL
   metaPsid: text('meta_psid'),
+  // Dono/responsável pelo lead. Nulo = lead ainda não reivindicado, visível
+  // pra qualquer vendedor na fila compartilhada. Quando um vendedor "assume"
+  // um lead (ou ele é atribuído manualmente), passa a aparecer só pra esse
+  // vendedor e para quem tiver a permissão VIEW_ALL_LEADS.
+  assignedUserId: text('assigned_user_id').references(() => users.id, { onDelete: 'set null' }),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 }, (table) => {
@@ -167,4 +172,60 @@ export const webhookEvents = sqliteTable('webhook_events', {
   return {
     eventIdx: uniqueIndex('webhook_events_provider_event_idx').on(table.provider, table.eventId),
   };
+});
+
+// ---------------------------------------------------------------------------
+// Autenticação, permissões e auditoria
+// ---------------------------------------------------------------------------
+
+// Não usamos uma tabela de sessões: a sessão fica num JWT assinado dentro de
+// um cookie httpOnly (Auth.js / NextAuth v5, provider de Credentials). Isso
+// evita mais uma tabela pra manter e funciona bem no ambiente serverless da
+// Vercel (nada de estado de sessão pra persistir no banco a cada login).
+export const users = sqliteTable('users', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  email: text('email').notNull(),
+  passwordHash: text('password_hash').notNull(),
+  // SUPER_ADMIN sempre tem acesso total, independente das permissões
+  // individuais em user_permissions. ADMIN/VENDEDOR são só rótulos
+  // informativos e servem de ponto de partida pros presets da tela de
+  // permissões — quem manda de fato é a tabela user_permissions.
+  role: text('role').notNull().default('VENDEDOR'), // SUPER_ADMIN | ADMIN | VENDEDOR
+  status: text('status').notNull().default('ACTIVE'), // ACTIVE | INACTIVE
+  lastLoginAt: integer('last_login_at', { mode: 'timestamp' }),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+}, (table) => {
+  return {
+    emailIdx: uniqueIndex('users_email_idx').on(table.email),
+  };
+});
+
+export const userPermissions = sqliteTable('user_permissions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  permissionKey: text('permission_key').notNull(), // ex.: LEAD_VIEW, AI_GENERATE_MESSAGE, INSTAGRAM_SEND_MESSAGE
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+}, (table) => {
+  return {
+    userPermissionIdx: uniqueIndex('user_permissions_user_key_idx').on(table.userId, table.permissionKey),
+  };
+});
+
+export const auditLogs = sqliteTable('audit_logs', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id, { onDelete: 'set null' }),
+  // Nome do usuário no momento da ação, guardado à parte pra o log continuar
+  // legível mesmo se o usuário for renomeado ou desativado depois.
+  userName: text('user_name'),
+  action: text('action').notNull(), // ex.: AUTH_LOGIN, LEAD_STAGE_CHANGED, USER_CREATED
+  category: text('category').notNull(), // AUTH | USERS | LEADS | PIPELINE | MESSAGES | AUTOMATION | SETTINGS
+  entityType: text('entity_type'), // ex.: LEAD, USER, SETTINGS
+  entityId: text('entity_id'),
+  description: text('description').notNull(),
+  metadata: text('metadata'), // JSON string — nunca senha, token, API key ou cookie
+  ipAddress: text('ip_address'),
+  userAgent: text('user_agent'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });

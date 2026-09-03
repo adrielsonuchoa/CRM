@@ -2,7 +2,12 @@ import { createClient } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
 
-const client = createClient({ url: 'file:sqlite.db' });
+// Antes fixo em 'file:sqlite.db' — passou a respeitar TURSO_DATABASE_URL,
+// igual ao runtime (src/db/index.ts) e ao drizzle.config.ts, pra migração e
+// aplicação sempre baterem no mesmo banco.
+const url = process.env.TURSO_DATABASE_URL || process.env.DATABASE_URL || 'file:sqlite.db';
+const authToken = process.env.TURSO_AUTH_TOKEN;
+const client = createClient({ url, authToken: authToken || undefined });
 const db = drizzle(client);
 
 async function runMigrate() {

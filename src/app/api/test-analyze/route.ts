@@ -3,14 +3,26 @@ import { db } from '@/db';
 import { leads, activities } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import crypto from 'crypto';
+import { getCurrentUser } from '@/lib/auth-helpers';
 
 /**
- * Quick test endpoint to force analyze a specific lead
+ * Quick test endpoint to force analyze a specific lead — endpoint de
+ * diagnóstico que muta dados (score, pipeline) sem passar por permissão
+ * granular nenhuma. RECOMENDADO: apague este arquivo (e a pasta
+ * test-analyze inteira) agora que a tela de Fila de Prospecção já cobre
+ * este fluxo de verdade. Enquanto não for apagado, fica restrito a
+ * SUPER_ADMIN.
+ *
  * GET /api/test-analyze?leadId=UUID
  * GET /api/test-analyze?mode=fallback  (Process all DESCOBERTO leads with fallback)
  */
 export async function GET(request: Request) {
   try {
+    const user = await getCurrentUser();
+    if (!user || user.role !== 'SUPER_ADMIN') {
+      return Response.json({ error: 'Não autorizado.' }, { status: 403 });
+    }
+
     const { searchParams } = new URL(request.url);
     const leadId = searchParams.get('leadId');
     const mode = searchParams.get('mode');
