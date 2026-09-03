@@ -5,6 +5,7 @@ import { db } from '@/db';
 import { users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { logAudit } from '@/lib/audit-log';
+import authConfig from './auth.config';
 
 // Best-effort só — atrás de proxies (Vercel, etc.) o IP real vem em
 // x-forwarded-for; sem isso, seguimos sem IP em vez de travar o login.
@@ -38,10 +39,7 @@ if (!process.env.AUTH_SECRET) {
 }
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
-  session: { strategy: 'jwt' },
-  pages: {
-    signIn: '/login',
-  },
+  ...authConfig,
   providers: [
     Credentials({
       credentials: {
@@ -108,25 +106,4 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       },
     }),
   ],
-  callbacks: {
-    // Guardamos só o essencial no token (id/role). Permissões finas NÃO
-    // ficam aqui: elas são lidas do banco a cada ação sensível (ver
-    // src/lib/auth-helpers.ts), pra uma revogação de permissão ou uma
-    // desativação de usuário feita pelo admin valer imediatamente, e não só
-    // depois que o token expirar ou o usuário logar de novo.
-    jwt({ token, user }) {
-      if (user) {
-        token.id = user.id;
-        token.role = user.role ?? 'VENDEDOR';
-      }
-      return token;
-    },
-    session({ session, token }) {
-      if (session.user && token.id) {
-        session.user.id = String(token.id);
-        session.user.role = String(token.role ?? 'VENDEDOR');
-      }
-      return session;
-    },
-  },
 });

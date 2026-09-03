@@ -1,4 +1,5 @@
-import { auth } from '@/auth';
+import NextAuth from 'next-auth';
+import authConfig from './auth.config';
 import { NextResponse } from 'next/server';
 
 // Rotas que não exigem sessão: a própria tela de login, os endpoints do
@@ -11,6 +12,8 @@ const PUBLIC_PATHS = ['/login', '/api/auth', '/api/webhooks', '/api/health'];
 function isPublicPath(pathname: string) {
   return PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
 }
+
+const { auth } = NextAuth(authConfig);
 
 export default auth((req) => {
   const { pathname, search } = req.nextUrl;
