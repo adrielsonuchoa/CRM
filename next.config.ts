@@ -7,7 +7,10 @@ const nextConfig: NextConfig = {
   // "standalone": produz .next/standalone com um server.js autocontido e só
   // os node_modules realmente usados - é o que permite rodar no PC do
   // cliente com um Node portátil, sem precisar de npm install lá.
-  output: 'standalone',
+  // Na Vercel fica desligado: ela tem o proprio empacotamento, e com
+  // standalone ligado a etapa final do build dela falha procurando
+  // .next/next-server.js.nft.json.
+  output: process.env.VERCEL ? undefined : 'standalone',
   // O rastreamento de arquivos do Next só segue imports de código; as
   // migrações do Drizzle são lidas do disco em tempo de execução (ver
   // src/instrumentation.ts), então precisam ser incluídas explicitamente
