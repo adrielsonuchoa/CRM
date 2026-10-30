@@ -1,13 +1,18 @@
 import { db } from '@/db';
 import { leads } from '@/db/schema';
 import { PipelineBoard } from '@/components/pipeline/pipeline-board';
-import { desc, notInArray } from 'drizzle-orm';
+import { and, desc, notInArray } from 'drizzle-orm';
+import { redirect } from 'next/navigation';
+import { getCurrentUser, userHasPermission } from '@/lib/auth-helpers';
+import { leadVisibilityCondition } from '@/lib/lead-access';
 import { NO_CONTACT_STAGE } from '@/lib/lead-contact';
 
 export const dynamic = 'force-dynamic';
 
 export default async function PipelinePage() {
-  const allLeads = await db.select().from(leads).where(notInArray(leads.pipelineStage, ['DESCARTADO', NO_CONTACT_STAGE, 'PERDIDO', 'NÃO CONTATAR'])).orderBy(desc(leads.leadScore));
+  const currentUser = await getCurrentUser();
+  if (!currentUser || !userHasPermission(currentUser, 'LEAD_VIEW')) redirect('/');
+  const allLeads = await db.select().from(leads).where(and(notInArray(leads.pipelineStage, ['DESCARTADO', NO_CONTACT_STAGE, 'PERDIDO', 'NÃO CONTATAR']), leadVisibilityCondition(currentUser))).orderBy(desc(leads.leadScore));
 
   return (
     <div className="h-full flex flex-col space-y-4">

@@ -9,6 +9,7 @@ import { requirePermission, AuthError, ForbiddenError } from '@/lib/auth-helpers
 import { logAudit } from '@/lib/audit-log';
 import { cancelPendingFollowUps, FOLLOW_UP_STAGE, scheduleFollowUpAfterContact } from '@/lib/follow-ups';
 import { PRE_CONTACT_STAGES } from '@/lib/lead-contact';
+import { canAccessLead } from '@/lib/lead-access';
 
 export type ContactChannel = 'INSTAGRAM' | 'WHATSAPP' | 'EMAIL';
 const CONTACT_CHANNELS: ContactChannel[] = ['INSTAGRAM', 'WHATSAPP', 'EMAIL'];
@@ -25,6 +26,7 @@ function authErrorMessage(error: unknown): string | null {
 export async function updateLeadStage(leadId: string, newStage: string) {
   try {
     const user = await requirePermission('LEAD_UPDATE_STAGE');
+    if (!(await canAccessLead(user, leadId))) return { success: false, error: 'Lead não encontrado.' };
 
     const existing = await db.select({ pipelineStage: leads.pipelineStage }).from(leads).where(eq(leads.id, leadId)).limit(1);
     const oldStage = existing[0]?.pipelineStage ?? 'NOVO';
@@ -72,6 +74,7 @@ export async function updateLeadStage(leadId: string, newStage: string) {
 export async function markMessageSent(leadId: string, messageSent: string, channel: ContactChannel = 'INSTAGRAM') {
   try {
     const user = await requirePermission('LEAD_MARK_SENT');
+    if (!(await canAccessLead(user, leadId))) return { success: false, error: 'Lead não encontrado.' };
     if (!CONTACT_CHANNELS.includes(channel)) return { success: false, error: 'Canal inválido.' };
 
     const existing = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
@@ -146,6 +149,7 @@ export async function markMessageSent(leadId: string, messageSent: string, chann
 export async function doNotContactLead(leadId: string) {
   try {
     const user = await requirePermission('LEAD_MARK_DO_NOT_CONTACT');
+    if (!(await canAccessLead(user, leadId))) return { success: false, error: 'Lead não encontrado.' };
 
     const existing = await db.select({ pipelineStage: leads.pipelineStage, businessName: leads.businessName }).from(leads).where(eq(leads.id, leadId)).limit(1);
     const oldStage = existing[0]?.pipelineStage ?? 'NOVO';
@@ -191,6 +195,7 @@ export async function doNotContactLead(leadId: string) {
 export async function addLeadNote(leadId: string, note: string) {
   try {
     const user = await requirePermission('LEAD_UPDATE_NOTES');
+    if (!(await canAccessLead(user, leadId))) return { success: false, error: 'Lead não encontrado.' };
 
     const existing = await db.select({ notes: leads.notes }).from(leads).where(eq(leads.id, leadId)).limit(1);
     const currentNotes = existing[0]?.notes ?? '';

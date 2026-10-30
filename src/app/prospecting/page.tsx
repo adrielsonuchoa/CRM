@@ -1,12 +1,17 @@
 import { db } from '@/db';
 import { leads, settings } from '@/db/schema';
 import { and, desc, inArray, ne } from 'drizzle-orm';
+import { redirect } from 'next/navigation';
+import { getCurrentUser, userHasPermission } from '@/lib/auth-helpers';
+import { leadVisibilityCondition } from '@/lib/lead-access';
 import { ProspectingQueue } from './prospecting-queue';
 import { ProspectingRunPanel } from './prospecting-run-panel';
 
 export const dynamic = 'force-dynamic';
 
 export default async function ProspectingPage() {
+  const currentUser = await getCurrentUser();
+  if (!currentUser || !userHasPermission(currentUser, 'LEAD_VIEW')) redirect('/');
   let queueLeads = [] as any[];
   let defaultDesiredCount = 10;
   try {
@@ -48,6 +53,7 @@ export default async function ProspectingPage() {
     }).from(leads)
       .where(and(
         ne(leads.source, 'TEST_FIXTURE'),
+        leadVisibilityCondition(currentUser),
         inArray(leads.pipelineStage, ['DESCOBERTO', 'ANALISANDO', 'QUALIFICADO', 'AGUARDANDO_CONTATO', 'NOVO', 'PESQUISANDO', 'PRONTO PARA CONTATO'])
       ))
       .orderBy(desc(leads.leadScore), desc(leads.createdAt))

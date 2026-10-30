@@ -1,7 +1,9 @@
 import { db } from '@/db';
 import { leads, activities, tasks } from '@/db/schema';
 import { and, asc, eq, desc } from 'drizzle-orm';
-import { notFound } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
+import { getCurrentUser, userHasPermission } from '@/lib/auth-helpers';
+import { canSeeLead } from '@/lib/lead-access';
 import { TASK_STATUS } from '@/lib/follow-ups';
 import { LeadDetailClient } from './lead-detail-client';
 
@@ -13,10 +15,12 @@ export async function generateMetadata({ params }: { params: Promise<{ id: strin
 
 export default async function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  const currentUser = await getCurrentUser();
+  if (!currentUser || !userHasPermission(currentUser, 'LEAD_VIEW')) redirect('/');
   const leadRecord = await db.select().from(leads).where(eq(leads.id, id)).limit(1);
   const lead = leadRecord[0];
 
-  if (!lead) notFound();
+  if (!lead || !canSeeLead(currentUser, lead)) notFound();
 
   const [leadActivities, pendingTasks] = await Promise.all([
     db

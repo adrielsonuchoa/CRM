@@ -1,6 +1,9 @@
 import { db } from '@/db';
 import { leads, activities } from '@/db/schema';
 import { desc, eq } from 'drizzle-orm';
+import { redirect } from 'next/navigation';
+import { getCurrentUser, userHasPermission } from '@/lib/auth-helpers';
+import { leadVisibilityCondition } from '@/lib/lead-access';
 import { LeadsTable } from './leads-table';
 
 export const metadata = {
@@ -10,7 +13,9 @@ export const metadata = {
 export const dynamic = 'force-dynamic';
 
 export default async function LeadsPage() {
-  const allLeads = await db.select().from(leads).orderBy(desc(leads.createdAt));
+  const currentUser = await getCurrentUser();
+  if (!currentUser || !userHasPermission(currentUser, 'LEAD_VIEW')) redirect('/');
+  const allLeads = await db.select().from(leads).where(leadVisibilityCondition(currentUser)).orderBy(desc(leads.createdAt));
 
   // Última mensagem gerada por IA de cada lead (pra pré-preencher o link do
   // WhatsApp) - uma query só pra todos os leads, em vez de N+1.

@@ -4,7 +4,7 @@ import { db } from '@/db';
 import { leads, tasks } from '@/db/schema';
 import { getCurrentUser, userHasPermission } from '@/lib/auth-helpers';
 import { TASK_STATUS } from '@/lib/follow-ups';
-import { canViewAllLeads } from '@/lib/lead-access';
+import { leadVisibilityCondition } from '@/lib/lead-access';
 import { buildWhatsAppUrl } from '@/lib/phone';
 import { TasksClient } from './tasks-client';
 
@@ -20,8 +20,7 @@ export default async function TasksPage() {
     redirect('/');
   }
 
-  const conditions = [eq(tasks.status, TASK_STATUS.PENDING)];
-  if (!canViewAllLeads(currentUser)) conditions.push(eq(leads.assignedUserId, currentUser.id));
+  const conditions = [eq(tasks.status, TASK_STATUS.PENDING), leadVisibilityCondition(currentUser)];
 
   const rows = await db
     .select({
