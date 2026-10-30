@@ -4,8 +4,10 @@ import { useState, useMemo } from 'react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { Button, buttonVariants } from '@/components/ui/button';
+import { buildWhatsAppUrl } from '@/lib/phone';
 import Link from 'next/link';
-import { Search, Store } from 'lucide-react';
+import { Search, Store, MessageCircle } from 'lucide-react';
 
 type Lead = {
   id: string;
@@ -19,6 +21,9 @@ type Lead = {
   hasDelivery: boolean | null;
   hasDiningRoom: boolean | null;
   doNotContact: boolean | null;
+  phone: string | null;
+  whatsapp: string | null;
+  lastGeneratedMessage: string | null;
 };
 
 export function LeadsTable({ initialLeads }: { initialLeads: Lead[] }) {
@@ -109,12 +114,34 @@ export function LeadsTable({ initialLeads }: { initialLeads: Lead[] }) {
                     <Badge variant="secondary" className="text-xs whitespace-nowrap">{lead.pipelineStage}</Badge>
                   </TableCell>
                   <TableCell className="text-right">
-                    <Link
-                      href={`/leads/${lead.id}`}
-                      className="text-sm font-medium text-blue-600 hover:underline"
-                    >
-                      Ver Detalhes →
-                    </Link>
+                    <div className="flex items-center justify-end gap-3">
+                      {(() => {
+                        const waUrl = buildWhatsAppUrl(lead.whatsapp ?? lead.phone, lead.lastGeneratedMessage);
+                        return waUrl ? (
+                          <a
+                            href={waUrl}
+                            target="whatsapp-web"
+                            onClick={(e) => e.stopPropagation()}
+                            title="Abrir conversa no WhatsApp"
+                            className={buttonVariants({ variant: 'outline', size: 'sm' })}
+                          >
+                            <MessageCircle className="w-3.5 h-3.5 mr-1 text-green-600" />
+                            WhatsApp
+                          </a>
+                        ) : (
+                          <Button variant="outline" size="sm" disabled title="Sem telefone válido para WhatsApp">
+                            <MessageCircle className="w-3.5 h-3.5 mr-1 opacity-40" />
+                            WhatsApp
+                          </Button>
+                        );
+                      })()}
+                      <Link
+                        href={`/leads/${lead.id}`}
+                        className="text-sm font-medium text-blue-600 hover:underline"
+                      >
+                        Ver Detalhes →
+                      </Link>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))

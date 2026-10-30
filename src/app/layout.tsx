@@ -21,8 +21,8 @@ export default async function RootLayout({
   const currentUser = await getCurrentUser();
 
   return (
-    <html lang="pt-BR" suppressHydrationWarning>
-      <body className={`${inter.className} min-h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-50 flex`}>
+    <html lang="pt-BR" className="dark" suppressHydrationWarning>
+      <body className={`${inter.className} min-h-screen bg-neutral-50 dark:bg-background text-neutral-900 dark:text-neutral-50 flex`}>
         <AppShell currentUser={currentUser}>{children}</AppShell>
       </body>
     </html>

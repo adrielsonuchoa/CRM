@@ -48,3 +48,11 @@ yarn-error.log*
 next-env.d.ts
 tmp/ 
 env.local.download 
+
+# diagnostico local de Chrome/Playwright (perfis de teste e resultados - nunca vai pro git)
+scripts/_diag/
+
+# instaladores gerados por cliente (contem segredos: AUTH_SECRET, senha do
+# admin, chaves de API, e o Node.js portatil/sqlite.db do pacote) - nunca vai pro git
+/dist/
+scripts/.node-cache/

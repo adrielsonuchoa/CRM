@@ -6,7 +6,7 @@ import { eq, and, ne } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { requirePermission, AuthError, ForbiddenError } from '@/lib/auth-helpers';
+import { requirePermission, invalidateCurrentUserCache, AuthError, ForbiddenError } from '@/lib/auth-helpers';
 import { logAudit } from '@/lib/audit-log';
 import { ALL_PERMISSION_KEYS, type PermissionKey } from '@/lib/permissions';
 
@@ -180,6 +180,11 @@ export async function updateUserAction(userId: string, formData: FormData) {
     if (!isSelf) {
       await replaceUserPermissions(userId, permissionKeys);
     }
+
+    // Papel/status/permissoes mudaram - invalida o cache curto de
+    // getCurrentUser pra essa mudanca valer na proxima acao do usuario
+    // afetado, sem esperar o TTL.
+    invalidateCurrentUserCache(userId);
 
     const changes: string[] = [];
     if (name !== target.name) changes.push('nome');

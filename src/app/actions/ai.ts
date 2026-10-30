@@ -175,11 +175,14 @@ Informações institucionais da Sirrus: ${((await db.select().from(settings).lim
 
       const response = await withTimeout(
         openai.chat.completions.create(scoreParams as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming),
-        40000 // 40-second timeout (folga para latencia de rede + compilacao a frio do Next dev)
+        20000 // 20s: o modelo responde em ~1-2s; 3 tentativas ainda cobrem picos de rede
       );
       rawContent = response.choices[0].message.content;
     } catch (timeoutErr: any) {
-      if (retryCount < 2) {
+      // Sem credito (402), chave invalida (401/403) ou requisicao invalida
+      // (400) nao melhoram tentando de novo - vai direto pro score basico.
+      const retryable = ![400, 401, 402, 403].includes(Number(timeoutErr?.status));
+      if (retryable && retryCount < 2) {
         console.warn(`[AI] Timeout/erro na tentativa ${retryCount + 1}, tentando novamente...`, timeoutErr?.message);
         await new Promise(r => setTimeout(r, 1000 * (retryCount + 1))); // Backoff
         return analyzeLeadAction(leadId, retryCount + 1);
@@ -333,6 +336,59 @@ export async function generateMessageAction(leadId: string, strategy: string = '
   } catch (error: any) {
     console.error('Error generating message:', error);
     return { success: false, error: error.message };
+  }
+}
+
+// Gera usernames plausiveis do Instagram via IA - chamada unica e rapida
+// (~1-2s no OpenRouter) que substitui parte da tentativa-e-erro mecanica de
+// guessInstagramUsernames (que so combina palavras do nome, sem nenhum
+// conhecimento de convencao real de handle). Usado como fonte de candidato
+// ADICIONAL (nunca a unica) em enrichLeadWithInstagram - cada candidato
+// ainda e verificado de verdade contra o Instagram antes de ser aceito, isso
+// so melhora a ORDEM/qualidade dos primeiros palpites pra reduzir quantas
+// paginas do Instagram precisam ser abertas ate achar o perfil certo.
+export async function suggestInstagramUsernamesWithAI(
+  businessName: string,
+  city: string | null,
+  category: string | null,
+): Promise<string[]> {
+  try {
+    const openai = getOpenAI();
+    const prompt = `Sugira até 5 nomes de usuário (@handle) do Instagram mais prováveis para este estabelecimento comercial brasileiro, em ordem de probabilidade. Considere convenções reais e comuns de handles de negócios: nome compacto sem espaços/acentos, variações com "_", abreviações do nome, e às vezes a cidade ou sigla do estado no final. Não invente nomes aleatórios - baseie-se no nome real informado.
+
+Nome do estabelecimento: ${businessName}
+Cidade: ${city ?? 'não informado'}
+Categoria: ${category ?? 'restaurante/alimentação'}
+
+Retorne estritamente um JSON no formato: {"usernames": ["handle1", "handle2", ...]}`;
+
+    const model = getAiModel();
+    const params: Record<string, unknown> = {
+      model,
+      messages: [
+        { role: 'system', content: 'Você sugere nomes de usuário plausíveis do Instagram para negócios brasileiros reais. Responda apenas com o JSON pedido, sem texto extra.' },
+        { role: 'user', content: prompt },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 200,
+    };
+
+    const response = await withTimeout(
+      openai.chat.completions.create(params as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming),
+      8000,
+    );
+    const rawContent = response.choices[0]?.message?.content;
+    if (!rawContent) return [];
+
+    const parsed = JSON.parse(rawContent);
+    const usernames = Array.isArray(parsed.usernames) ? parsed.usernames : [];
+    return usernames
+      .map((u: unknown) => String(u).replace(/^@/, '').trim().toLowerCase())
+      .filter((u: string) => /^[a-z0-9._]{3,30}$/.test(u))
+      .slice(0, 5);
+  } catch (error: any) {
+    console.warn('[AI] suggestInstagramUsernamesWithAI falhou (seguindo so com os palpites mecânicos):', error?.message ?? error);
+    return [];
   }
 }
 

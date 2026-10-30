@@ -1,12 +1,20 @@
 import { db } from '@/db';
-import { leads } from '@/db/schema';
+import { leads, settings } from '@/db/schema';
 import { and, desc, inArray, ne } from 'drizzle-orm';
 import { ProspectingQueue } from './prospecting-queue';
+import { ProspectingRunPanel } from './prospecting-run-panel';
 
 export const dynamic = 'force-dynamic';
 
 export default async function ProspectingPage() {
   let queueLeads = [] as any[];
+  let defaultDesiredCount = 10;
+  try {
+    const s = (await db.select({ dailyQueueSize: settings.dailyQueueSize }).from(settings).limit(1))[0];
+    defaultDesiredCount = s?.dailyQueueSize ?? 10;
+  } catch {
+    // Sem settings ainda (banco novo) - mantem o padrao.
+  }
   try {
     // Select only safe/existing columns to avoid referencing newly added columns
     // that might not yet be present in the SQLite file (pre-migration).
@@ -16,6 +24,7 @@ export default async function ProspectingPage() {
       instagramUsername: leads.instagramUsername,
       instagramUrl: leads.instagramUrl,
       phone: leads.phone,
+      whatsapp: leads.whatsapp,
       website: leads.website,
       city: leads.city,
       state: leads.state,
@@ -41,8 +50,8 @@ export default async function ProspectingPage() {
         ne(leads.source, 'TEST_FIXTURE'),
         inArray(leads.pipelineStage, ['DESCOBERTO', 'ANALISANDO', 'QUALIFICADO', 'AGUARDANDO_CONTATO', 'NOVO', 'PESQUISANDO', 'PRONTO PARA CONTATO'])
       ))
-      .orderBy(desc(leads.leadScore))
-      .limit(10);
+      .orderBy(desc(leads.leadScore), desc(leads.createdAt))
+      .limit(Math.min(Math.max(defaultDesiredCount, 10), 100));
   } catch (err: any) {
     // If migrations haven't been applied or a column is missing, avoid crashing the page.
     console.error('[PROSPECTING] DB query failed:', err?.message ?? err);
@@ -53,8 +62,10 @@ export default async function ProspectingPage() {
     <div className="h-full flex flex-col space-y-4">
       <div className="flex flex-col gap-1">
         <h1 className="text-3xl font-bold tracking-tight">Fila de Prospecção</h1>
-        <p className="text-neutral-500">Modo Assistido - Analise leads, gere mensagens e aprove os envios.</p>
+        <p className="text-neutral-700 dark:text-neutral-300">Modo Assistido - Analise leads, gere mensagens e aprove os envios.</p>
       </div>
+
+      <ProspectingRunPanel defaultDesiredCount={defaultDesiredCount} />
 
       <div className="flex-1 overflow-auto">
         <ProspectingQueue initialLeads={queueLeads} />

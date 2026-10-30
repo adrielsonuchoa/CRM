@@ -2,6 +2,17 @@ import NextAuth from 'next-auth';
 import authConfig from './auth.config';
 import { NextResponse } from 'next/server';
 
+// IMPORTANTE: usar aqui uma instancia de NextAuth construida so com
+// `authConfig` (sem providers/banco/bcrypt), nao o `auth` completo de
+// `@/auth`. O middleware roda no Edge Runtime, que nao tem acesso a
+// filesystem nem suporta o client de banco local (`file:...`) - so o client
+// via fetch, usado com Turso remoto. Como a sessao usa estrategia JWT, o
+// middleware nao precisa tocar o banco pra validar quem esta logado; so o
+// login em si (rota Node, fora do Edge) usa `@/auth` com o provider
+// Credentials. Importar `@/auth` aqui quebra qualquer instalacao rodando
+// com banco local (o modo usado no PC do cliente, sem Turso).
+const { auth } = NextAuth(authConfig);
+
 // Rotas que não exigem sessão: a própria tela de login, os endpoints do
 // Auth.js, os webhooks do Meta/Instagram (autenticados por assinatura HMAC
 // própria, não por sessão de usuário — ver app/api/webhooks/instagram), e o
@@ -12,8 +23,6 @@ const PUBLIC_PATHS = ['/login', '/api/auth', '/api/webhooks', '/api/health'];
 function isPublicPath(pathname: string) {
   return PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
 }
-
-const { auth } = NextAuth(authConfig);
 
 export default auth((req) => {
   const { pathname, search } = req.nextUrl;

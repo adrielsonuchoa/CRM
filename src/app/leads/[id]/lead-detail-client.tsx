@@ -7,6 +7,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { addLeadNote, updateLeadStage } from '@/app/actions';
+import { buildWhatsAppUrl } from '@/lib/phone';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import {
@@ -94,7 +95,8 @@ export function LeadDetailClient({ lead, activities }: { lead: Lead; activities:
 
   const normalIg = normalizeInstagram(lead.instagramUsername);
   const normalPhone = normalizePhone(lead.phone);
-  const normalWa = normalizePhone(lead.whatsapp ?? lead.phone);
+  const lastGeneratedMessage = activities.find((a) => a.type === 'MESSAGE_GENERATED' && a.content)?.content ?? null;
+  const whatsAppUrl = buildWhatsAppUrl(lead.whatsapp ?? lead.phone, lastGeneratedMessage);
 
   function getScoreColor() {
     if (!lead.leadScore) return 'text-neutral-400';
@@ -203,8 +205,8 @@ export function LeadDetailClient({ lead, activities }: { lead: Lead; activities:
                 </Button>
               )}
 
-              {normalWa ? (
-                <a href={`https://wa.me/55${normalWa}`} target="_blank" rel="noreferrer" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+              {whatsAppUrl ? (
+                <a href={whatsAppUrl} target="whatsapp-web" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
                   <MessageCircle className="w-4 h-4 mr-1.5 text-green-600" />
                   WhatsApp
                   <ExternalLink className="w-3 h-3 ml-1 opacity-60" />

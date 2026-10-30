@@ -3,7 +3,7 @@
 import { useState, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog,
@@ -16,9 +16,10 @@ import {
 import { analyzeLeadActionAuthorized as analyzeLeadAction, generateMessageActionAuthorized as generateMessageAction } from '@/app/actions/ai';
 import { markMessageSent, doNotContactLead, clearAllLeadsAction } from '@/app/actions';
 import { cancelPreparedDmAction, confirmPreparedDmAction, previewInstagramProfileAction, sendFirstDmAction } from '@/app/settings/actions-automation';
+import { buildWhatsAppUrl } from '@/lib/phone';
 import {
   AtSign, BrainCircuit, MessageSquareText, CheckCircle, Send,
-  SkipForward, Copy, Check, AlertTriangle, RefreshCw, BanIcon, Bot, X
+  SkipForward, Copy, Check, AlertTriangle, RefreshCw, BanIcon, Bot, X, MessageCircle, ExternalLink
 } from 'lucide-react';
 
 type Lead = {
@@ -30,6 +31,7 @@ type Lead = {
   subcategory: string | null;
   followers: number | null;
   phone: string | null;
+  whatsapp: string | null;
   website: string | null;
   city: string | null;
   state: string | null;
@@ -48,6 +50,20 @@ type Lead = {
 export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   const [leads, setLeads] = useState(initialLeads);
   const [currentIndex, setCurrentIndex] = useState(0);
+
+  // initialLeads so era capturado uma vez (useState) e nunca mais
+  // atualizado, entao leads novos encontrados por uma busca direcionada em
+  // andamento nunca apareciam sem um F5 manual. Ressincroniza quando o
+  // conjunto de ids mudar de verdade (novo lead chegou), preservando
+  // edicoes otimistas locais (ex.: handleAnalyze) quando nada mudou. Ajuste
+  // de estado durante a renderizacao (padrao recomendado pelo React pra
+  // "resetar estado quando uma prop muda"), em vez de useEffect + setState.
+  const [syncedIds, setSyncedIds] = useState(() => initialLeads.map((lead) => lead.id).join(','));
+  const incomingIds = initialLeads.map((lead) => lead.id).join(',');
+  if (incomingIds !== syncedIds) {
+    setSyncedIds(incomingIds);
+    setLeads(initialLeads);
+  }
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -56,6 +72,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showDoNotContactDialog, setShowDoNotContactDialog] = useState(false);
+  const [showClearAllDialog, setShowClearAllDialog] = useState(false);
   const [isAutoSending, setIsAutoSending] = useState(false);
   const [isConfirmingDm, setIsConfirmingDm] = useState(false);
   const [showInstagramPanel, setShowInstagramPanel] = useState(false);
@@ -72,8 +89,14 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setIsConfirmingDm(false);
   };
 
-  const handleClearAll = async () => {
-    if (!window.confirm("Deseja realmente limpar todos os leads e atividades do banco?")) return;
+  const handleConfirmClearAll = async () => {
+    // window.confirm() nativo foi trocado por este dialog da propria
+    // aplicacao: o backend mantem uma conexao Playwright permanente com essa
+    // mesma aba (pro polling de status a cada 3s), e o comportamento padrao
+    // do Playwright e auto-descartar qualquer dialog nativo sem um listener
+    // registrado - o que podia cancelar o confirm() sozinho antes do clique
+    // humano ser processado, fazendo o botao parecer que "nao faz nada".
+    setShowClearAllDialog(false);
     const res = await clearAllLeadsAction();
     if (res.success) {
       resetDmPanel();
@@ -137,7 +160,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setIsSending(true);
     const res = await markMessageSent(currentLead.id, message);
     if (res.success) {
-      await cancelPreparedDmAction(currentLead.id);
+      void cancelPreparedDmAction(currentLead.id).catch(() => undefined);
       resetDmPanel();
       setMessage('');
       setCurrentIndex(prev => prev + 1);
@@ -147,31 +170,18 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setIsSending(false);
   };
 
-  const handleSkip = async () => {
+  const handleSkip = () => {
     clearError();
     const skippedLead = leads[currentIndex];
-    if (skippedLead) await cancelPreparedDmAction(skippedLead.id);
+    // Atualiza a tela na hora do clique - o cancelamento da DM preparada e so
+    // limpeza de bastidor (fecha um navegador de fundo, se houver, e grava um
+    // log), nao algo que a proxima tela precisa esperar. Antes isso era
+    // aguardado antes de avançar, entao o clique ficava "pendurado" ate essa
+    // chamada de rede (banco remoto) voltar, e so entao tudo pulava de vez.
     resetDmPanel();
     setMessage('');
     setCurrentIndex(prev => prev + 1);
-  };
-
-  const handlePreviewInstagram = async () => {
-    if (!currentLead || isAutoSending) return;
-    clearError();
-    setShowInstagramPanel(true);
-    setDmStatus('CONNECTING');
-    setInstagramScreenshot(null);
-    setIsAutoSending(true);
-    const res = await previewInstagramProfileAction(currentLead.id);
-    setIsAutoSending(false);
-    if (res.success && res.screenshot) {
-      setInstagramScreenshot(res.screenshot);
-      setDmStatus('VIEWING');
-    } else {
-      setDmStatus('ERROR');
-      setError(res.error || 'Não foi possível visualizar o perfil do Instagram.');
-    }
+    if (skippedLead) void cancelPreparedDmAction(skippedLead.id).catch(() => undefined);
   };
 
   const handleAutoSend = async () => {
@@ -183,7 +193,22 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setDmStatus('CONNECTING');
     setInstagramScreenshot(null);
     setIsAutoSending(true);
+
+    // Mostra a screenshot do CACHE (se a busca ja validou esse perfil antes)
+    // assim que possivel, em paralelo com a preparacao real da conversa -
+    // assim o usuario ve a imagem do perfil quase na hora em vez de olhar
+    // pro espaco vazio girando o tempo todo, mesmo que a conversa
+    // interativa em si (obrigatoria pra poder digitar/enviar de verdade)
+    // ainda leve mais alguns segundos pra ficar pronta.
+    let resultadoRealChegou = false;
+    void previewInstagramProfileAction(currentLead.id).then((preview) => {
+      if (!resultadoRealChegou && preview.success && preview.screenshot) {
+        setInstagramScreenshot(preview.screenshot);
+      }
+    }).catch(() => undefined);
+
     const res = await sendFirstDmAction(currentLead.id, message.trim() || undefined);
+    resultadoRealChegou = true;
     setIsAutoSending(false);
     if (res.success && res.prepared) {
       if (res.message) setMessage(res.message);
@@ -224,7 +249,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setShowDoNotContactDialog(false);
     const res = await doNotContactLead(currentLead.id);
     if (res.success) {
-      await cancelPreparedDmAction(currentLead.id);
+      void cancelPreparedDmAction(currentLead.id).catch(() => undefined);
       resetDmPanel();
       setMessage('');
       setCurrentIndex(prev => prev + 1);
@@ -250,16 +275,34 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     const normalized = withoutBaseUrl.split(/[/?#]/)[0].trim();
     return normalized && /^[a-zA-Z0-9._]+$/.test(normalized) ? normalized.toLowerCase() : null;
   })();
+  const whatsAppUrl = currentLead ? buildWhatsAppUrl(currentLead.whatsapp ?? currentLead.phone, message) : null;
 
   if (isEmpty) {
     return (
-      <div className="flex flex-col items-center justify-center h-64 text-neutral-500 border-2 border-dashed rounded-xl bg-neutral-50 dark:bg-neutral-900/50 space-y-4">
+      <div className="flex flex-col items-center justify-center h-64 text-neutral-600 dark:text-neutral-400 border-2 border-dashed rounded-xl bg-neutral-50 dark:bg-neutral-900/50 space-y-4">
         <CheckCircle className="w-14 h-14 text-green-500" />
         <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-50">Fila concluída!</h2>
         <p className="mt-1">Nenhum lead prioritário restante na fila de hoje.</p>
-        <Button variant="destructive" size="sm" onClick={handleClearAll}>
+        <Button variant="destructive" size="sm" onClick={() => setShowClearAllDialog(true)}>
           Limpar Todos os Leads
         </Button>
+        <Dialog open={showClearAllDialog} onOpenChange={setShowClearAllDialog}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-red-600" />
+                Confirmar: Limpar Todos os Leads
+              </DialogTitle>
+              <DialogDescription>
+                Deseja realmente limpar todos os leads e atividades do banco? Esta ação é irreversível.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowClearAllDialog(false)}>Cancelar</Button>
+              <Button variant="destructive" onClick={handleConfirmClearAll}>Confirmar: Limpar Tudo</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     );
   }
@@ -267,7 +310,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   return (
     <div className="max-w-7xl mx-auto space-y-4">
       <div className="flex justify-end">
-        <Button variant="destructive" size="sm" onClick={handleClearAll}>
+        <Button variant="destructive" size="sm" onClick={() => setShowClearAllDialog(true)}>
           Limpar Todos os Leads
         </Button>
       </div>
@@ -281,8 +324,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
       )}
 
       <div className={showInstagramPanel ? 'grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_420px] gap-4 items-start' : ''}>
-      <Card className="border-2 border-neutral-200 dark:border-neutral-800 shadow-lg min-w-0">
-        <CardHeader className="bg-neutral-50 dark:bg-neutral-900/60 border-b border-neutral-200 dark:border-neutral-800 rounded-t-xl">
+      <Card className="border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 shadow-md min-w-0">
+        <CardHeader className="bg-neutral-100 dark:bg-neutral-900/60 border-b border-neutral-300 dark:border-neutral-800 rounded-t-xl">
           <div className="flex justify-between items-start gap-4">
             <div className="flex-1 min-w-0">
               <CardTitle className="text-2xl font-bold flex flex-wrap items-center gap-2">
@@ -293,7 +336,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
                   </Badge>
                 )}
               </CardTitle>
-              <div className="flex flex-wrap gap-3 mt-2 text-sm text-neutral-500">
+              <div className="flex flex-wrap gap-3 mt-2 text-sm text-neutral-700 dark:text-neutral-300">
                 <span>📍 {currentLead!.neighborhood ?? 'Bairro não informado'}</span>
                 {(currentLead!.city || currentLead!.state) && <span>• {[currentLead!.city, currentLead!.state].filter(Boolean).join(' / ')}</span>}
                 <span>•</span>
@@ -311,10 +354,10 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
             </div>
 
             <div className="text-right shrink-0">
-              <div className={`text-4xl font-black ${currentLead!.leadScore != null && currentLead!.leadScore >= 80 ? 'text-blue-600' : currentLead!.leadScore != null && currentLead!.leadScore >= 60 ? 'text-green-600' : 'text-neutral-400'}`}>
+              <div className={`text-4xl font-black ${currentLead!.leadScore != null && currentLead!.leadScore >= 80 ? 'text-blue-600' : currentLead!.leadScore != null && currentLead!.leadScore >= 60 ? 'text-green-600' : 'text-neutral-600 dark:text-neutral-400'}`}>
                 {currentLead!.leadScore ?? '—'}
               </div>
-              <div className="text-xs text-neutral-500 uppercase font-bold tracking-wider">Score /100</div>
+              <div className="text-xs text-neutral-600 dark:text-neutral-400 uppercase font-bold tracking-wider">Score /100</div>
             </div>
           </div>
         </CardHeader>
@@ -324,7 +367,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* Left: Info */}
             <div className="space-y-3">
-              <h3 className="font-semibold text-base border-b border-neutral-200 dark:border-neutral-800 pb-2">Informações</h3>
+              <h3 className="font-semibold text-base text-neutral-900 dark:text-neutral-50 border-b border-neutral-300 dark:border-neutral-800 pb-2">Informações</h3>
               <ul className="space-y-2 text-sm">
                 {[
                   ['Categoria', currentLead!.category],
@@ -334,8 +377,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
                   ['Garçons', currentLead!.hasWaiters ? 'Sim ✓' : currentLead!.hasWaiters === false ? 'Não' : '?'],
                 ].map(([label, value]) => (
                   <li key={label} className="flex justify-between">
-                    <span className="text-neutral-500">{label}</span>
-                    <span className="font-medium">{value ?? '—'}</span>
+                    <span className="text-neutral-600 dark:text-neutral-400">{label}</span>
+                    <span className="font-semibold text-neutral-900 dark:text-neutral-50">{value ?? '—'}</span>
                   </li>
                 ))}
               </ul>
@@ -343,7 +386,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
 
             {/* Right: AI Analysis */}
             <div className="space-y-3">
-              <h3 className="font-semibold text-base border-b border-neutral-200 dark:border-neutral-800 pb-2">Análise de IA</h3>
+              <h3 className="font-semibold text-base text-neutral-900 dark:text-neutral-50 border-b border-neutral-300 dark:border-neutral-800 pb-2">Análise de IA</h3>
               {currentLead!.qualificationStatus ? (
                 <div className="space-y-3">
                   <Badge variant={currentLead!.leadScore != null && currentLead!.leadScore > 80 ? 'default' : 'secondary'}>
@@ -351,10 +394,10 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
                   </Badge>
                   {painPoints.length > 0 && (
                     <div>
-                      <p className="text-xs text-neutral-500 mb-2 font-semibold uppercase tracking-wide">Possíveis Necessidades</p>
+                      <p className="text-xs text-neutral-600 dark:text-neutral-400 mb-2 font-semibold uppercase tracking-wide">Possíveis Necessidades</p>
                       <div className="flex flex-wrap gap-1.5">
                         {painPoints.map((pp) => (
-                          <Badge key={pp} variant="outline" className="text-xs bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/20 dark:text-orange-300">
+                          <Badge key={pp} variant="outline" className="text-xs bg-orange-50 text-orange-800 border-orange-300 dark:bg-orange-950/20 dark:text-orange-300">
                             {pp}
                           </Badge>
                         ))}
@@ -364,7 +407,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
                   <button
                     onClick={handleAnalyze}
                     disabled={isAnalyzing}
-                    className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-700 disabled:opacity-50"
+                    className="flex items-center gap-1.5 text-xs text-neutral-600 dark:text-neutral-400 hover:text-neutral-700 disabled:opacity-50"
                   >
                     <RefreshCw className="w-3 h-3" />
                     {isAnalyzing ? 'Reanalisando...' : 'Reanalisar'}
@@ -372,7 +415,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
                 </div>
               ) : (
                 <div className="flex flex-col items-center justify-center h-36 bg-neutral-100 dark:bg-neutral-800/50 rounded-lg border border-dashed border-neutral-300 dark:border-neutral-700">
-                  <p className="text-sm text-neutral-500 mb-3">Lead não analisado pela IA</p>
+                  <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">Lead não analisado pela IA</p>
                   <Button onClick={handleAnalyze} disabled={isAnalyzing} size="sm">
                     <BrainCircuit className="w-4 h-4 mr-2" />
                     {isAnalyzing ? 'Analisando...' : 'Analisar Lead'}
@@ -385,12 +428,12 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
           {/* Message section */}
           <div className="space-y-3 border-t border-neutral-200 dark:border-neutral-800 pt-6">
             <div className="flex flex-wrap justify-between items-center gap-2">
-              <h3 className="font-semibold text-base">Mensagem de Abordagem</h3>
+              <h3 className="font-semibold text-base text-neutral-900 dark:text-neutral-50">Mensagem de Abordagem</h3>
               <div className="flex items-center gap-2">
                 <select
                   value={strategy}
                   onChange={(e) => setStrategy(e.target.value)}
-                  className="text-sm border border-neutral-200 dark:border-neutral-700 rounded-md px-2 py-1.5 bg-white dark:bg-neutral-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="text-sm text-neutral-900 dark:text-neutral-50 border border-neutral-300 dark:border-neutral-700 rounded-md px-2 py-1.5 bg-white dark:bg-neutral-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="Consultiva">Consultiva</option>
                   <option value="Local">Local (Maceió)</option>
@@ -399,7 +442,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
                 </select>
                 <Button onClick={handleGenerateMessage} disabled={isGenerating} size="sm" variant="secondary">
                   <MessageSquareText className="w-4 h-4 mr-2" />
-                  {isGenerating ? 'Gerando...' : message ? 'Regenerar' : 'Gerar com IA'}
+                  {isGenerating ? 'Gerando...' : 'Criar/Regenerar'}
                 </Button>
               </div>
             </div>
@@ -408,15 +451,15 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               placeholder="Gere uma mensagem com IA ou escreva aqui. Você pode editar antes de enviar."
-              className="min-h-[130px] text-base resize-none"
+              className="min-h-[130px] text-base text-neutral-900 dark:text-neutral-50 border-neutral-300 placeholder:text-neutral-500 resize-none"
             />
-            <p className="text-xs text-neutral-400">
-              💡 Modo Assistido: copie a mensagem, abra o Instagram, envie manualmente e clique em &quot;Marcar como Enviada&quot;.
+            <p className="text-xs text-neutral-600 dark:text-neutral-400">
+              💡 Clique em &quot;Criar/Regenerar&quot; pra gerar uma mensagem com IA, ou digite a sua própria aqui.
             </p>
           </div>
         </CardContent>
 
-        <CardFooter className="bg-neutral-50 dark:bg-neutral-900/60 border-t border-neutral-200 dark:border-neutral-800 rounded-b-xl p-4 flex flex-wrap justify-between gap-3">
+        <CardFooter className="bg-neutral-100 dark:bg-neutral-900/60 border-t border-neutral-300 dark:border-neutral-800 rounded-b-xl p-4 flex flex-wrap justify-between gap-3">
           <div className="flex gap-2">
             <Button variant="ghost" onClick={handleSkip} size="sm">
               <SkipForward className="w-4 h-4 mr-1.5" />
@@ -425,7 +468,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
             <Button
               variant="ghost"
               size="sm"
-              className="text-red-600 hover:text-red-700 hover:bg-red-50"
+              className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-950/30"
               onClick={() => setShowDoNotContactDialog(true)}
             >
               <BanIcon className="w-4 h-4 mr-1.5" />
@@ -435,10 +478,20 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
 
           <div className="flex gap-2 flex-wrap">
             {normalizedInstagram ? (
-              <Button variant="outline" size="sm" onClick={handlePreviewInstagram} disabled={isAutoSending}>
+              // So um link de verdade pra aba do navegador ja aberta - o
+              // perfil real e interativo, sem precisar de screenshot via
+              // Playwright (isso ficou reservado pra quando realmente e
+              // preciso, como preparar a conversa em "Preparar DM").
+              <a
+                href={`https://www.instagram.com/${normalizedInstagram}/`}
+                target="_blank"
+                rel="noreferrer"
+                className={buttonVariants({ variant: 'outline', size: 'sm' })}
+              >
                 <AtSign className="w-4 h-4 mr-1.5" />
                 Visualizar perfil
-              </Button>
+                <ExternalLink className="w-3 h-3 ml-1.5 opacity-60" />
+              </a>
             ) : (
               <Button variant="outline" size="sm" disabled title="Instagram não cadastrado">
                 <AtSign className="w-4 h-4 mr-1.5" />
@@ -450,6 +503,23 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               {copied ? <Check className="w-4 h-4 mr-1.5 text-green-600" /> : <Copy className="w-4 h-4 mr-1.5" />}
               {copied ? 'Copiado!' : 'Copiar'}
             </Button>
+
+            {whatsAppUrl ? (
+              <a
+                href={whatsAppUrl}
+                target="whatsapp-web"
+                className={buttonVariants({ variant: 'outline', size: 'sm' })}
+                title="Abrir conversa no WhatsApp com a mensagem preenchida"
+              >
+                <MessageCircle className="w-4 h-4 mr-1.5 text-green-600" />
+                WhatsApp
+              </a>
+            ) : (
+              <Button variant="outline" size="sm" disabled title="Sem telefone válido para WhatsApp">
+                <MessageCircle className="w-4 h-4 mr-1.5 opacity-40" />
+                Sem WhatsApp
+              </Button>
+            )}
 
             <Button
               size="sm"
@@ -483,7 +553,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
       </Card>
 
       {showInstagramPanel && (
-        <Card className="overflow-hidden border-neutral-300 shadow-lg xl:sticky xl:top-4">
+        <Card className="overflow-hidden border-neutral-300 bg-white dark:bg-neutral-950 shadow-md xl:sticky xl:top-4">
           <CardHeader className="border-b bg-gradient-to-r from-fuchsia-600 via-pink-600 to-orange-500 p-4 text-white">
             <div className="flex items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
@@ -505,7 +575,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               <span className={`h-2.5 w-2.5 rounded-full ${dmStatus === 'ERROR' ? 'bg-red-500' : dmStatus === 'PREPARED' ? 'bg-amber-500' : dmStatus === 'SENT' ? 'bg-green-500' : dmStatus === 'CONNECTING' ? 'animate-pulse bg-blue-500' : 'bg-neutral-300'}`} />
               {dmStatus === 'CONNECTING' && 'Carregando o Instagram em segundo plano...'}
               {dmStatus === 'VIEWING' && 'Perfil do Instagram carregado'}
-              {dmStatus === 'PREPARED' && 'Mensagem digitada — aguardando sua confirmação'}
+              {dmStatus === 'PREPARED' && (message.trim() ? 'Mensagem digitada — aguardando sua confirmação' : 'Conversa aberta — crie a mensagem com IA ou digite a sua')}
               {dmStatus === 'SENT' && 'Mensagem enviada e registrada no CRM'}
               {dmStatus === 'ERROR' && 'Não foi possível preparar a conversa'}
               {dmStatus === 'IDLE' && 'Clique em “Preparar DM” para abrir a conversa'}
@@ -514,27 +584,27 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
             {instagramScreenshot ? (
               <div className="aspect-[4/3] rounded-lg border bg-cover bg-top shadow-inner" style={{ backgroundImage: `url(${instagramScreenshot})` }} role="img" aria-label="Visualização atual do Instagram Direct" />
             ) : (
-              <div className="flex aspect-[4/3] flex-col items-center justify-center gap-3 rounded-lg border border-dashed bg-neutral-50 text-center text-neutral-500 dark:bg-neutral-900">
+              <div className="flex aspect-[4/3] flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-neutral-300 bg-neutral-50 text-center text-neutral-600 dark:text-neutral-400 dark:bg-neutral-900">
                 {dmStatus === 'CONNECTING' ? <RefreshCw className="h-8 w-8 animate-spin text-pink-500" /> : <AtSign className="h-10 w-10 text-pink-500" />}
                 <p className="max-w-64 text-sm">A visualização do Direct aparecerá aqui, sem sair do CRM.</p>
               </div>
             )}
 
             <div className="space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Mensagem no chat</p>
-              <Textarea value={message} onChange={(event) => setMessage(event.target.value)} className="min-h-28 resize-none" placeholder="A mensagem será digitada aqui e no Instagram Direct." />
+              <p className="text-xs font-semibold uppercase tracking-wide text-neutral-600 dark:text-neutral-400">Mensagem no chat</p>
+              <Textarea value={message} onChange={(event) => setMessage(event.target.value)} className="min-h-28 text-neutral-900 dark:text-neutral-50 border-neutral-300 placeholder:text-neutral-500 resize-none" placeholder="A mensagem será digitada aqui e no Instagram Direct." />
             </div>
             <Button className="w-full bg-blue-600 text-white hover:bg-blue-700" onClick={handleConfirmDm} disabled={dmStatus !== 'PREPARED' || !message.trim() || isConfirmingDm}>
               {isConfirmingDm ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
               {isConfirmingDm ? 'Confirmando...' : 'Confirmar e enviar agora'}
             </Button>
-            <p className="text-center text-[11px] text-neutral-400">O sistema só pressiona Enter depois desta confirmação.</p>
+            <p className="text-center text-[11px] text-neutral-600 dark:text-neutral-400">O sistema só pressiona Enter depois desta confirmação.</p>
           </CardContent>
         </Card>
       )}
       </div>
 
-      <div className="text-center text-sm text-neutral-500">
+      <div className="text-center text-sm text-neutral-600 dark:text-neutral-400">
         Lead <strong>{currentIndex + 1}</strong> de <strong>{leads.length}</strong> na fila de hoje
       </div>
 
@@ -557,6 +627,25 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               <BanIcon className="w-4 h-4 mr-2" />
               Confirmar: Não Contatar
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Clear All Leads Confirmation Dialog */}
+      <Dialog open={showClearAllDialog} onOpenChange={setShowClearAllDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-red-600" />
+              Confirmar: Limpar Todos os Leads
+            </DialogTitle>
+            <DialogDescription>
+              Deseja realmente limpar todos os leads e atividades do banco? Esta ação é irreversível.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowClearAllDialog(false)}>Cancelar</Button>
+            <Button variant="destructive" onClick={handleConfirmClearAll}>Confirmar: Limpar Tudo</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

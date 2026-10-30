@@ -4,6 +4,11 @@ import type { NextAuthConfig } from 'next-auth';
 // Nao importar banco, bcrypt ou crypto aqui: este arquivo entra no bundle
 // do middleware e precisa permanecer compativel com Edge Runtime.
 const authConfig = {
+  // O app roda 100% local (localhost, sem exposicao publica/proxy externo)
+  // no PC do cliente - sem isso, o Auth.js v5 rejeita o proprio localhost
+  // como "UntrustedHost" fora do modo dev (ex.: no server.js do build
+  // standalone), e o login nunca funciona.
+  trustHost: true,
   session: { strategy: 'jwt' },
   pages: {
     signIn: '/login',

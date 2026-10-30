@@ -21,6 +21,10 @@ const eslintConfig = defineConfig([
     "tmp/**",
     ".test-*.ts",
     ".tmp-*.ts",
+    // dist/ e o pacote final gerado por scripts/prepare-client-installer.ps1
+    // (build compilado + node_modules do cliente) - nao e codigo-fonte, so
+    // ".next/**" acima nao cobre porque aqui fica aninhado (dist/<cliente>/.next/**).
+    "dist/**",
   ]),
 ]);
 

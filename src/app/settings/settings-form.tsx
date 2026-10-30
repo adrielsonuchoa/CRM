@@ -285,7 +285,7 @@ export function SettingsForm({
               MODO DE TESTE ativo: pesquisa, analise e mensagens funcionam; envios reais ficam bloqueados.
             </div>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
             <div>
               <span className="text-neutral-500 block text-xs">Status do Worker</span>
               <span className="font-semibold flex items-center gap-1.5 mt-1">
@@ -317,13 +317,6 @@ export function SettingsForm({
               <span className="text-neutral-500 block text-xs">Perfil Configurado</span>
               <span className="font-medium mt-1 block truncate">
                 {workerStatus.instagramProfile ? `@${workerStatus.instagramProfile}` : 'Não informado'}
-              </span>
-            </div>
-
-            <div>
-              <span className="text-neutral-500 block text-xs">Enviados Hoje / Limite</span>
-              <span className="font-medium mt-1 block">
-                {workerStatus.sentToday} / {workerStatus.dailyLimit} DMs
               </span>
             </div>
           </div>
@@ -485,14 +478,13 @@ export function SettingsForm({
         <Separator />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label htmlFor="dailyQueueSize">Leads por dia na fila</Label>
-            <Input id="dailyQueueSize" name="dailyQueueSize" type="number" min="1" max="50" defaultValue={s?.dailyQueueSize ?? 10} />
-          </div>
-          <div className="space-y-2">
             <Label htmlFor="minScoreForQueue">Score mínimo para fila</Label>
             <Input id="minScoreForQueue" name="minScoreForQueue" type="number" min="0" max="100" defaultValue={s?.minScoreForQueue ?? 0} />
           </div>
         </div>
+        <p className="text-xs text-neutral-500">
+          A quantidade de leads buscados agora é definida diretamente na tela de Prospecção, no campo &quot;Quantidade de leads desejados&quot;.
+        </p>
       </section>
 
       <section className="space-y-6">

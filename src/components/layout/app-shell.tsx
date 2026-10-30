@@ -24,7 +24,7 @@ export function AppShell({ children, currentUser }: { children: React.ReactNode;
       <Sidebar currentUser={currentUser} />
       <main className="flex-1 flex flex-col h-screen overflow-hidden">
         <WorkerProgress />
-        <div className="flex-1 overflow-auto bg-neutral-100/50 dark:bg-neutral-900/50 p-6">
+        <div className="flex-1 overflow-auto bg-neutral-100/50 dark:bg-transparent p-6">
           {children}
         </div>
       </main>

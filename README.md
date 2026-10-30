@@ -41,6 +41,17 @@ npm run start
 
 ## Iniciar Chrome com CDP
 
+No Windows, copie `Claude outputs/Iniciar CRM-1.bat` **e**
+`Claude outputs/Iniciar CRM.ps1` juntos (os dois precisam estar na mesma
+pasta) para a Area de Trabalho do cliente. O `.bat` inicia o Chrome em um
+perfil dedicado (`C:\\ChromeCRM`) com CDP na porta 9222 e abre o CRM; ele
+detecta o Chrome mesmo em instalacoes sem admin, evita abrir uma segunda
+instancia conflitante no mesmo perfil, e so inicia o `npm run dev` se ainda
+nao estiver rodando. Depois do primeiro login (via
+`Claude outputs/Login Instagram (uma vez so).bat`), mantenha a janela do
+Chrome aberta durante a prospeccao. O worker reaproveita os cookies do
+Instagram desse perfil; nao e necessario informar usuario ou senha no CRM.
+
 Windows PowerShell:
 
 ```powershell

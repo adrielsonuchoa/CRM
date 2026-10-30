@@ -27,12 +27,37 @@ export class ForbiddenError extends Error {
   }
 }
 
+// O banco (Turso, remoto) custa ~150-700ms por ida-e-volta a partir do PC do
+// cliente - e getCurrentUser fazia DUAS consultas sequenciais a cada UNICA
+// acao/clique no sistema inteiro (usuario + permissoes), sem nenhum cache.
+// Isso sozinho respondia pela maior parte da lentidao percebida ao clicar em
+// qualquer botao. Cache curtissimo (poucos segundos) em memoria: continua
+// essencialmente "tempo real" pro usuario, mas elimina a consulta repetida
+// quando ele clica varias vezes seguidas (ex.: navegando a fila de
+// prospeccao). Invalidado na hora (ver invalidateCurrentUserCache) sempre
+// que um admin muda o papel/status/permissoes de alguem pela propria tela do
+// CRM - so fica com a folga do TTL se os dados forem alterados por fora
+// (direto no banco), o mesmo caso que o design anterior tambem nao cobria
+// de outra forma.
+type CachedUser = { user: CurrentUser; expiresAt: number };
+const currentUserCache = new Map<string, CachedUser>();
+const CURRENT_USER_CACHE_TTL_MS = 4000;
+
 /**
- * Retorna o usuário autenticado com dados FRESCOS do banco (status +
- * permissões) a cada chamada — nunca os dados congelados no JWT/cookie.
- * É isso que garante que uma desativação de usuário ou a revogação de uma
- * permissão feita por um admin valham imediatamente na próxima ação, sem
- * esperar o token expirar ou o usuário logar de novo.
+ * Chame depois de qualquer escrita que mude role/status/permissions de um
+ * usuário (ver updateUserAction) para essa mudança valer imediatamente na
+ * próxima ação dele, em vez de esperar o TTL do cache expirar.
+ */
+export function invalidateCurrentUserCache(userId: string): void {
+  currentUserCache.delete(userId);
+}
+
+/**
+ * Retorna o usuário autenticado com dados do banco (status + permissões),
+ * com um cache de poucos segundos em memória — não os dados congelados no
+ * JWT/cookie. Uma desativação ou revogação de permissão feita pela tela de
+ * usuários do CRM invalida o cache na hora (invalidateCurrentUserCache);
+ * fora isso, o pior caso é uma folga de alguns segundos.
  *
  * Retorna null se não houver sessão válida, se o usuário tiver sido
  * removido do banco, ou se estiver com status INACTIVE.
@@ -41,6 +66,9 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
   const session = await auth();
   const sessionUserId = session?.user?.id;
   if (!sessionUserId) return null;
+
+  const cached = currentUserCache.get(sessionUserId);
+  if (cached && cached.expiresAt > Date.now()) return cached.user;
 
   const record = (await db.select().from(users).where(eq(users.id, sessionUserId)).limit(1))[0];
   if (!record) return null;
@@ -51,7 +79,7 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
     .from(userPermissions)
     .where(eq(userPermissions.userId, record.id));
 
-  return {
+  const result: CurrentUser = {
     id: record.id,
     name: record.name,
     email: record.email,
@@ -59,6 +87,8 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
     status: record.status,
     permissions: permissionRows.map((row) => row.permissionKey) as PermissionKey[],
   };
+  currentUserCache.set(sessionUserId, { user: result, expiresAt: Date.now() + CURRENT_USER_CACHE_TTL_MS });
+  return result;
 }
 
 // SUPER_ADMIN sempre tem acesso total, por código — não depende de nenhuma

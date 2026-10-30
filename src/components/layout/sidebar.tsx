@@ -59,7 +59,7 @@ export function Sidebar({ currentUser }: { currentUser: SidebarUser | null }) {
   return (
     <div className="w-64 h-full bg-white dark:bg-neutral-950 border-r border-neutral-200 dark:border-neutral-800 flex flex-col">
       <div className="p-6 border-b border-neutral-200 dark:border-neutral-800 flex items-center gap-3">
-        <div className="bg-blue-600 p-2 rounded-lg">
+        <div className="bg-gradient-to-br from-blue-500 to-indigo-600 p-2 rounded-lg shadow-lg shadow-blue-600/30">
           <Store className="w-6 h-6 text-white" />
         </div>
         <div className="flex flex-col">
@@ -79,8 +79,8 @@ export function Sidebar({ currentUser }: { currentUser: SidebarUser | null }) {
               className={cn(
                 "flex items-center gap-3 px-3 py-2.5 rounded-md transition-all text-sm font-medium",
                 isActive
-                  ? "bg-blue-50 text-blue-700 dark:bg-blue-950/50 dark:text-blue-400"
-                  : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-900 hover:text-neutral-900 dark:hover:text-neutral-50"
+                  ? "bg-blue-50 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300 dark:ring-1 dark:ring-inset dark:ring-blue-400/20"
+                  : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800/60 hover:text-neutral-900 dark:hover:text-neutral-50"
               )}
             >
               <item.icon className="w-5 h-5" />
@@ -93,7 +93,7 @@ export function Sidebar({ currentUser }: { currentUser: SidebarUser | null }) {
       <div className="p-4 border-t border-neutral-200 dark:border-neutral-800">
         <div className="flex items-center gap-3">
           <Avatar>
-            <AvatarFallback className="bg-neutral-200 text-neutral-600">
+            <AvatarFallback className="bg-neutral-200 text-neutral-600 dark:bg-blue-600/20 dark:text-blue-300">
               {currentUser ? initials(currentUser.name) : '—'}
             </AvatarFallback>
           </Avatar>

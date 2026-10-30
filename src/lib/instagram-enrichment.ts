@@ -4,7 +4,7 @@ import { activities, leads } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import crypto from 'crypto';
 import { findInstagramOnWebsite } from '@/lib/prospecting-sources';
-import { disambiguateInstagramCandidates } from '@/app/actions/ai';
+import { disambiguateInstagramCandidates, suggestInstagramUsernamesWithAI } from '@/app/actions/ai';
 
 
 export type InstagramProfileData = {
@@ -93,7 +93,133 @@ export function guessInstagramUsernames(businessName: string): string[] {
   return ordered;
 }
 
+// --- Leitura do perfil via JSON (endpoint web do proprio Instagram) --------
+// Renderizar a pagina do perfil custa varios segundos (SPA + imagens); o
+// mesmo endpoint que o site usa internamente devolve os dados em ~300ms, sem
+// renderizar nada. Usa os cookies da sessao do contexto do Playwright. Se o
+// Instagram recusar (429/401/redirect pro login), entra em pausa por alguns
+// minutos e o fluxo cai de volta na leitura pela pagina (comportamento antigo).
+const IG_WEB_APP_ID = '936619743392459';
+const IG_API_BACKOFF_MS = 5 * 60 * 1000;
+let igApiBackoffUntil = 0;
+let cachedUserAgent: string | null = null;
+
+async function getBrowserUserAgent(page: Page) {
+  if (cachedUserAgent) return cachedUserAgent;
+  const ua = await page.evaluate(() => navigator.userAgent).catch(() => '');
+  cachedUserAgent = ua ? ua.replace('HeadlessChrome', 'Chrome') : null;
+  return cachedUserAgent;
+}
+
+function cleanInstagramHandle(username: string) {
+  const raw = String(username).trim();
+  const withoutAt = raw.replace(/^@/, '');
+  const withoutBaseUrl = withoutAt
+    .replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '')
+    .replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
+  const normalized = withoutBaseUrl.split(/[/?#]/)[0].trim();
+  return normalized && /^[a-zA-Z0-9._]+$/.test(normalized) ? normalized.toLowerCase() : null;
+}
+
+/**
+ * undefined = API indisponivel (usar a pagina); null = perfil nao existe.
+ */
+export async function fetchInstagramProfileViaApi(page: Page, username: string): Promise<InstagramProfileData | null | undefined> {
+  const cleanUsername = cleanInstagramHandle(username);
+  if (!cleanUsername) return null;
+  if (Date.now() < igApiBackoffUntil) return undefined;
+
+  try {
+    const userAgent = await getBrowserUserAgent(page);
+    const response = await page.context().request.get(
+      `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(cleanUsername)}`,
+      {
+        headers: {
+          'x-ig-app-id': IG_WEB_APP_ID,
+          'x-requested-with': 'XMLHttpRequest',
+          referer: `https://www.instagram.com/${cleanUsername}/`,
+          ...(userAgent ? { 'user-agent': userAgent } : {}),
+        },
+        timeout: 8000,
+        failOnStatusCode: false,
+        maxRedirects: 0,
+      },
+    );
+
+    if (response.status() === 404) return null;
+    if (response.status() !== 200) {
+      console.warn(`[SCRAPE] API do Instagram respondeu ${response.status()} - usando a pagina por ${IG_API_BACKOFF_MS / 60000} min.`);
+      igApiBackoffUntil = Date.now() + IG_API_BACKOFF_MS;
+      return undefined;
+    }
+
+    const json: any = await response.json().catch(() => null);
+    if (!json) {
+      igApiBackoffUntil = Date.now() + IG_API_BACKOFF_MS;
+      return undefined;
+    }
+    const user = json?.data?.user;
+    if (!user) return null;
+
+    const followers = typeof user.edge_followed_by?.count === 'number' ? user.edge_followed_by.count : null;
+    const postsCount = typeof user.edge_owner_to_timeline_media?.count === 'number' ? user.edge_owner_to_timeline_media.count : null;
+    const bio: string | null = user.biography?.trim() || null;
+    const displayName: string | null = user.full_name?.trim() || null;
+    const website: string | null = user.external_url || user.bio_links?.[0]?.url || null;
+    const category: string | null = user.category_name || user.business_category_name || null;
+    const isPrivate = Boolean(user.is_private);
+    const phone: string | null = user.business_phone_number
+      || (bio?.match(/(\+?\d[\d\s().-]{6,}\d)/)?.[1] ?? null);
+
+    let address = '';
+    try {
+      const parsed = user.business_address_json ? JSON.parse(user.business_address_json) : null;
+      address = [parsed?.street_address, parsed?.city_name, parsed?.zip_code].filter(Boolean).join(', ');
+    } catch {}
+
+    // Mesmo papel do innerText da pagina: texto livre usado no score de
+    // confianca (cidade/telefone) e no snippet que a IA de analise le.
+    const profileText = [
+      displayName,
+      `@${cleanUsername}`,
+      category,
+      bio,
+      website,
+      phone,
+      address,
+      followers !== null ? `${followers} seguidores` : null,
+      postsCount !== null ? `${postsCount} publicações` : null,
+    ].filter(Boolean).join('\n').slice(0, 6000);
+
+    return {
+      username: cleanUsername,
+      displayName,
+      followers,
+      bio,
+      profileText,
+      postsCount,
+      isPrivate,
+      isActive: !isPrivate && (postsCount ?? 0) > 0,
+      category,
+      website,
+      phone,
+    };
+  } catch (err: any) {
+    // Erro de rede/timeout: pausa curta pra nao pagar o timeout de novo em
+    // cada candidato seguinte.
+    console.warn(`[SCRAPE] Falha na API do Instagram para ${cleanUsername}:`, err?.message);
+    igApiBackoffUntil = Date.now() + 60 * 1000;
+    return undefined;
+  }
+}
+
 export async function scrapeInstagramProfile(page: Page, username: string): Promise<InstagramProfileData | null> {
+  const viaApi = await fetchInstagramProfileViaApi(page, username);
+  if (viaApi !== undefined) return viaApi;
+  return scrapeInstagramProfileFromPage(page, username);
+}
+
+async function scrapeInstagramProfileFromPage(page: Page, username: string): Promise<InstagramProfileData | null> {
   const cleanUsername = (() => {
     const raw = String(username).trim();
     const withoutAt = raw.replace(/^@/, '');
@@ -114,7 +240,10 @@ export async function scrapeInstagramProfile(page: Page, username: string): Prom
     console.error(`[SCRAPE] page.goto failed for ${cleanUsername}:`, err?.message);
     return null;
   }
-  await page.waitForTimeout(2500);
+  // Espera condicional (mesmo teto de 2,5s de antes): segue assim que o
+  // cabecalho do perfil renderizar, em vez de sempre gastar o tempo inteiro.
+  await page.waitForSelector('header section, main header', { timeout: 2500 }).catch(() => undefined);
+  await page.waitForTimeout(300);
 
   const data = await page.evaluate(() => {
     const bodyText = document.body?.innerText ?? '';
@@ -223,98 +352,150 @@ function websitesMatch(url1: string, url2: string): boolean {
   return w1 === w2 || w1.includes(w2) || w2.includes(w1);
 }
 
+// --- Busca de @ do Instagram em buscadores ---------------------------------
+// Bing primeiro: responde em ~0,5s e traz o perfil certo com consultas
+// "<nome> <cidade> instagram". O DuckDuckGo (buscador antigo) fica so como
+// reserva - em algumas redes ele nem conecta (timeout de ~20s por consulta,
+// 3 consultas por lead, era o maior gargalo da prospeccao). Um buscador que
+// falhar por conexao fica de fora por alguns minutos (circuit breaker), pra
+// nao pagar o timeout de novo em cada lead seguinte.
+type SearchProvider = 'bing' | 'duckduckgo';
+const SEARCH_PROVIDER_COOLDOWN_MS = 10 * 60 * 1000;
+const searchProviderDownUntil: Record<SearchProvider, number> = { bing: 0, duckduckgo: 0 };
+
+function isProviderAvailable(provider: SearchProvider) {
+  return Date.now() >= searchProviderDownUntil[provider];
+}
+
+function markProviderDown(provider: SearchProvider, reason: string) {
+  searchProviderDownUntil[provider] = Date.now() + SEARCH_PROVIDER_COOLDOWN_MS;
+  console.warn(`[SEARCH] ${provider} indisponivel (${reason}) - ignorado por ${SEARCH_PROVIDER_COOLDOWN_MS / 60000} min.`);
+}
+
+// Extrai os @ de todos os links da pagina de resultados, desembrulhando os
+// redirecionadores do Bing (/ck/a?...&u=a1<base64url>) e do DDG (?uddg=).
+function extractInstagramHandlesFromResults(page: Page) {
+  return page.evaluate(() => {
+    const ignored = ['accounts', 'explore', 'reels', 'reel', 'p', 'direct', 'stories', 'tags', 'about', 'privacy', 'terms', 'login', 'signup', 'legal', 'popular'];
+    // Sem funcoes nomeadas aqui dentro: este corpo roda no navegador, e
+    // alguns compiladores (tsx/esbuild com keepNames) injetam um helper
+    // __name que nao existe la.
+    const rawUrls: string[] = [];
+
+    for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))) {
+      let href = anchor.href || '';
+      try {
+        const url = new URL(href);
+        const bingTarget = url.searchParams.get('u');
+        const ddgTarget = url.searchParams.get('uddg');
+        if (url.hostname.endsWith('bing.com') && bingTarget?.startsWith('a1')) {
+          const b64 = bingTarget.slice(2).replace(/-/g, '+').replace(/_/g, '/');
+          href = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4));
+        } else if (ddgTarget) {
+          href = ddgTarget;
+        }
+      } catch {}
+      rawUrls.push(href);
+    }
+
+    // O Bing tambem mostra a URL de destino no <cite> ("instagram.com › usuario").
+    for (const cite of Array.from(document.querySelectorAll('cite'))) {
+      const text = (cite.textContent ?? '').replace(/\s*›\s*/g, '/').replace(/\s+/g, '');
+      if (text.includes('instagram.com/')) rawUrls.push(text.startsWith('http') ? text : `https://${text}`);
+    }
+
+    const values = new Set<string>();
+    for (const raw of rawUrls) {
+      if (!raw.includes('instagram.com')) continue;
+      try {
+        const url = new URL(raw);
+        // Links do proprio buscador que so citam instagram.com na query
+        // (ex.: bing.com/images?q=...instagram.com) nao sao perfis.
+        if (!/(^|\.)instagram\.com$/i.test(url.hostname)) continue;
+        const path = url.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)[0] ?? '';
+        if (!path || ignored.includes(path.toLowerCase())) continue;
+        if (/^[A-Za-z0-9._]+$/.test(path)) values.add(path.toLowerCase());
+      } catch {
+        // ignore malformed urls
+      }
+    }
+
+    return Array.from(values).slice(0, 12);
+  });
+}
+
+async function searchWithProvider(page: Page, provider: SearchProvider, query: string): Promise<string[]> {
+  const url = provider === 'bing'
+    ? `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=pt-br&cc=BR`
+    : `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+  return extractInstagramHandlesFromResults(page);
+}
+
+function isConnectionError(err: any) {
+  return /ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|ERR_ADDRESS_UNREACHABLE|Timeout .*exceeded|net::/i.test(String(err?.message ?? err));
+}
+
 export async function searchInstagramUsernames(
   page: Page,
   businessName: string,
   city: string | null,
 ): Promise<string[]> {
   const directCandidates = new Set<string>();
+  const cityPart = city ?? '';
 
-  const ddgQueries = [
-    `${businessName} ${city ?? ''} site:instagram.com`.trim(),
-    `${businessName} Instagram ${city ?? ''}`.trim(),
-    `${businessName} ${city ?? ''}`.trim(),
-  ];
+  const queriesByProvider: Record<SearchProvider, string[]> = {
+    // O operador site: no Bing volta resultados vazios pra bot - a consulta
+    // com a palavra "instagram" traz o perfil no topo.
+    bing: [
+      `${businessName} ${cityPart} instagram`.replace(/\s+/g, ' ').trim(),
+      `${businessName} instagram`.replace(/\s+/g, ' ').trim(),
+    ],
+    duckduckgo: [
+      `${businessName} ${cityPart} site:instagram.com`.replace(/\s+/g, ' ').trim(),
+      `${businessName} Instagram ${cityPart}`.replace(/\s+/g, ' ').trim(),
+    ],
+  };
 
-  for (const query of ddgQueries) {
-    if (!query) continue;
+  for (const provider of ['bing', 'duckduckgo'] as SearchProvider[]) {
+    if (!isProviderAvailable(provider)) continue;
+    let providerWorked = false;
 
-    try {
-      await page.goto(`https://duckduckgo.com/?q=${encodeURIComponent(query)}`, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-      await page.waitForTimeout(1800);
-
-      const handles = await page.evaluate(() => {
-        const values = new Set<string>();
-        const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
-
-        for (const anchor of links) {
-          const href = anchor.href || '';
-          if (!href.includes('instagram.com')) continue;
-          try {
-            const url = new URL(href);
-            const path = url.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)[0] ?? '';
-            if (!path || ['accounts', 'explore', 'reels', 'p', 'direct', 'stories', 'tags', 'about', 'privacy', 'terms', 'login', 'signup'].includes(path.toLowerCase())) continue;
-            if (/^[A-Za-z0-9._]+$/.test(path)) values.add(path.toLowerCase());
-          } catch {
-            // ignore malformed urls
-          }
-        }
-
-        return Array.from(values).slice(0, 12);
-      });
-
-      for (const handle of handles) {
-        directCandidates.add(handle);
-      }
-
-      if (directCandidates.size >= 10) break;
-    } catch {
-      // DuckDuckGo may block the bot or return a different page; continue with the next fallback
-    }
-  }
-
-  if (directCandidates.size > 0) {
-    return Array.from(directCandidates).slice(0, 10);
-  }
-
-  const fallbackGuesses = Array.from(
-    new Set([
-      ...guessInstagramUsernames(businessName),
-      ...(city ? guessInstagramUsernames(`${businessName} ${city}`) : []),
-      ...(businessName ? guessInstagramUsernames(businessName.replace(/\s+/g, '')) : []),
-    ])
-  ).slice(0, 8);
-
-  for (const candidate of fallbackGuesses) {
-      const cleanCandidate = (() => {
-        const raw = String(candidate).trim();
-        const withoutAt = raw.replace(/^@/, '');
-        const withoutBaseUrl = withoutAt
-          .replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '')
-          .replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
-        const normalized = withoutBaseUrl.split(/[/?#]/)[0].trim();
-        return normalized && /^[a-zA-Z0-9._]+$/.test(normalized) ? normalized.toLowerCase() : null;
-      })();
-      if (!cleanCandidate) continue;
-
+    for (const query of Array.from(new Set(queriesByProvider[provider]))) {
+      if (!query) continue;
       try {
-        await page.goto(`https://www.instagram.com/${cleanCandidate}/`, { waitUntil: 'domcontentloaded', timeout: 18000 });
-        await page.waitForTimeout(900);
-        const content = await page.locator('body').innerText({ timeout: 4000 }).catch(() => '');
-        const title = await page.title().catch(() => '');
-        const isLikelyProfile = !!content && !/Log In to Instagram|Entrar no Instagram|Page Not Found|Sorry|This page could not be found|Cadastre-se|temporariamente bloqueada|challenge|captcha/i.test(`${title} ${content}`);
-        if (isLikelyProfile) {
-          directCandidates.add(cleanCandidate);
+        const handles = await searchWithProvider(page, provider, query);
+        providerWorked = true;
+        for (const handle of handles) directCandidates.add(handle);
+        // A 1a consulta quase sempre ja traz o perfil certo; so faz a
+        // segunda quando ela veio fraca.
+        if (directCandidates.size >= 3) break;
+      } catch (err: any) {
+        if (isConnectionError(err)) {
+          markProviderDown(provider, String(err?.message ?? err).split('\n')[0].slice(0, 120));
           break;
         }
-      } catch (err: any) {
-        console.warn(`[ENRICHMENT] fallback guess failed for ${cleanCandidate}:`, err?.message);
+        // Outro erro (pagina diferente/bloqueio pontual): tenta a proxima consulta.
+        console.warn(`[SEARCH] Falha em ${provider} ("${query}"):`, String(err?.message ?? err).split('\n')[0]);
       }
     }
 
+    // So cai no buscador reserva se o principal nao funcionou ou nao achou nada.
+    if (providerWorked && directCandidates.size > 0) break;
+  }
+
+  // Antes, quando o DuckDuckGo nao achava nada, esta funcao MESMA abria ate
+  // 8 (depois 4) paginas reais do Instagram pra testar palpites mecanicos -
+  // um dos maiores gargalos de tempo do enriquecimento (cada tentativa podia
+  // levar ate 18s, e navegacoes "interrompidas" em sequencia rapida contra o
+  // Instagram eram comuns, as vezes levando o enriquecimento de UM lead a
+  // mais de 1 minuto so nessa etapa). Isso e redundante agora: os mesmos
+  // palpites mecanicos (guessInstagramUsernames) E os palpites da IA
+  // (suggestInstagramUsernamesWithAI) ja sao gerados e verificados de forma
+  // mais limpa direto em enrichLeadWithInstagram (scrapeInstagramProfile,
+  // com timeouts e espera mais adequados). Aqui so retorna o que o DDG achou
+  // (rapido, sem tocar o Instagram) - o resto do trabalho de tentativa fica
+  // por conta do fluxo principal, sem duplicar.
   return Array.from(directCandidates).slice(0, 10);
 }
 
@@ -581,38 +762,50 @@ export async function enrichLeadWithInstagram(
     }
   }
 
-  // 2. Website Instagram
-  if (lead.website) {
-    try {
-      const fromWebsite = await findInstagramOnWebsite(lead.website);
-      if (fromWebsite) {
-        const clean = fromWebsite.replace(/^@/, '').trim().toLowerCase();
-        if (clean) {
-          candidatesSet.add(clean);
-          if (!candidateSources.has(clean)) {
-            candidateSources.set(clean, 'website');
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[ENRICHMENT] findInstagramOnWebsite failed:', e);
+  // 2/3/AI. Website, busca no DuckDuckGo e sugestao por IA rodam em PARALELO
+  // (antes eram 3 passos sequenciais - o site sozinho ja podia levar alguns
+  // segundos, e so depois disso comecava a busca no DDG). A IA (OpenRouter)
+  // costuma responder em ~1-2s e da palpites de username bem mais
+  // direcionados que a combinatoria mecanica de guessInstagramUsernames -
+  // colocados com prioridade alta na lista, um palpite bom da IA reduz
+  // quantas paginas reais do Instagram precisam ser abertas ate achar o
+  // perfil certo (o "break" na linha do score >=80 para assim que acerta).
+  const [websiteResult, searchResult, aiResult] = await Promise.allSettled([
+    lead.website ? findInstagramOnWebsite(lead.website) : Promise.resolve(null),
+    searchInstagramUsernames(page, lead.businessName, lead.city),
+    suggestInstagramUsernamesWithAI(lead.businessName, lead.city, lead.category),
+  ]);
+
+  if (websiteResult.status === 'fulfilled' && websiteResult.value) {
+    const clean = websiteResult.value.replace(/^@/, '').trim().toLowerCase();
+    if (clean) {
+      candidatesSet.add(clean);
+      if (!candidateSources.has(clean)) candidateSources.set(clean, 'website');
     }
+  } else if (websiteResult.status === 'rejected') {
+    console.warn('[ENRICHMENT] findInstagramOnWebsite failed:', websiteResult.reason);
   }
 
-  // 3. Search candidates
-  try {
-    const searchResults = await searchInstagramUsernames(page, lead.businessName, lead.city);
-    for (const user of searchResults) {
+  if (aiResult.status === 'fulfilled') {
+    for (const user of aiResult.value) {
       const clean = user.replace(/^@/, '').trim().toLowerCase();
       if (clean) {
         candidatesSet.add(clean);
-        if (!candidateSources.has(clean)) {
-          candidateSources.set(clean, 'instagram_search');
-        }
+        if (!candidateSources.has(clean)) candidateSources.set(clean, 'ai_suggestion');
       }
     }
-  } catch (e) {
-    console.warn('[ENRICHMENT] searchInstagramUsernames failed:', e);
+  }
+
+  if (searchResult.status === 'fulfilled') {
+    for (const user of searchResult.value) {
+      const clean = user.replace(/^@/, '').trim().toLowerCase();
+      if (clean) {
+        candidatesSet.add(clean);
+        if (!candidateSources.has(clean)) candidateSources.set(clean, 'instagram_search');
+      }
+    }
+  } else {
+    console.warn('[ENRICHMENT] searchInstagramUsernames failed:', searchResult.reason);
   }
 
   const directCompactNames = Array.from(new Set(guessInstagramUsernames(lead.businessName))).slice(0, 4);
@@ -642,7 +835,7 @@ export async function enrichLeadWithInstagram(
   }
 
   const orderedUsernames: string[] = [];
-  const priorityOrder = ['website', 'existing_username', 'instagram_search', 'username_guess'];
+  const priorityOrder = ['website', 'existing_username', 'ai_suggestion', 'instagram_search', 'username_guess'];
   for (const pMethod of priorityOrder) {
     for (const user of candidatesSet) {
       if (candidateSources.get(user) === pMethod && !orderedUsernames.includes(user)) {
@@ -657,6 +850,25 @@ export async function enrichLeadWithInstagram(
   }
 
   const candidatesToProcess = orderedUsernames.slice(0, 3);
+
+  // Busca os candidatos via API em PARALELO (antes: uma pagina inteira por
+  // candidato, em sequencia). A ordem de avaliacao abaixo continua a mesma -
+  // so os dados ja chegam prontos. Quem a API nao respondeu (undefined) cai
+  // na leitura pela pagina, uma por vez (a Page nao aceita navegacao
+  // concorrente).
+  const prefetched = new Map<string, InstagramProfileData | null | undefined>(
+    await Promise.all(candidatesToProcess.map(async (username) =>
+      [username, await fetchInstagramProfileViaApi(page, username)] as const,
+    )),
+  );
+  const getProfile = async (username: string) => {
+    const cached = prefetched.get(username);
+    if (cached !== undefined) return cached;
+    const profile = await scrapeInstagramProfile(page, username);
+    prefetched.set(username, profile);
+    return profile;
+  };
+
   const scoredProfiles: Array<{
     profile: InstagramProfileData;
     score: number;
@@ -667,7 +879,7 @@ export async function enrichLeadWithInstagram(
 
   for (const username of candidatesToProcess) {
     try {
-      const profile = await scrapeInstagramProfile(page, username);
+      const profile = await getProfile(username);
       if (!profile || profile.isPrivate) {
         console.log(`[InstagramValidation] lead="${lead.businessName}" candidate="@${username}" score=0 signals=[] contradictions=["private_or_not_found"] decision="rejected"`);
         continue;
@@ -691,9 +903,18 @@ export async function enrichLeadWithInstagram(
         }
       }
 
-      if (method === 'username_guess' && finalScore >= 80) {
-        const hasOtherSignal = scoreResult.signals.includes('city') || scoreResult.signals.includes('phone') || scoreResult.signals.includes('website') || scoreResult.signals.includes('segment');
-        if (!(scoreResult.signals.includes('name') && hasOtherSignal)) {
+      // 'username_guess' e 'ai_suggestion' sao PALPITES, nao evidencia real
+      // (diferente de 'website'/'existing_username', que vem de um link que
+      // o proprio negocio publicou). Um nome comum ("Paladar", "Estilo",
+      // "Opção"...) pode bater com um perfil de outra cidade inteira so por
+      // coincidencia de nome+segmento - "segmento" aqui e fraco demais pra
+      // servir de confirmacao (e so um bater de palavras genericas tipo
+      // "restaurante"/"delivery" que qualquer perfil do ramo tem, nao prova
+      // que e o MESMO estabelecimento). Por isso exige cidade, telefone ou
+      // site batendo de verdade - nao aceita so por nome+segmento.
+      if ((method === 'username_guess' || method === 'ai_suggestion') && finalScore >= 80) {
+        const hasStrongCorroboration = scoreResult.signals.includes('city') || scoreResult.signals.includes('phone') || scoreResult.signals.includes('website');
+        if (!(scoreResult.signals.includes('name') && hasStrongCorroboration)) {
           finalScore = 79;
         }
       }
@@ -721,7 +942,7 @@ export async function enrichLeadWithInstagram(
     const fallbackCandidates = orderedUsernames.slice(1, 3);
     for (const username of fallbackCandidates) {
       try {
-        const profile = await scrapeInstagramProfile(page, username);
+        const profile = await getProfile(username);
         if (!profile || profile.isPrivate) continue;
         const scoreResult = calculateConfidenceScore(profile, lead.businessName, lead.city, lead.phone, lead.website);
         scoredProfiles.push({
@@ -748,13 +969,33 @@ export async function enrichLeadWithInstagram(
     selected = selectInstagramWinner(acceptedCandidates) ?? acceptedCandidates[0];
     validationMethod = selected.method;
   } else if (probableCandidates.length > 0) {
-    const deterministicWinner = selectInstagramWinner(probableCandidates);
+    // Um candidato "provável" (score 60-79) que veio de PALPITE
+    // (ai_suggestion/username_guess) SEM cidade/telefone/site confirmando de
+    // verdade na bio nunca e aceito - nem por regra determinística, nem
+    // mandando pra IA decidir. Testado na pratica: a IA, sem nenhuma
+    // evidência real de localização pra avaliar, tende a "confirmar" so pela
+    // plausibilidade generica de nome+categoria (ex.: "a categoria é
+    // compatível com a região") - exatamente o tipo de falso positivo que
+    // fazia perfis de OUTRA cidade passar (nomes comuns como "Paladar",
+    // "Estilo" existem em varias cidades). Sem evidência real, o candidato e
+    // rejeitado direto por segurança - melhor nao mandar mensagem do que
+    // mandar pro negocio errado.
+    const hasRealCorroboration = (c: typeof probableCandidates[number]) =>
+      c.method === 'website' || c.method === 'existing_username' ||
+      c.signals.includes('city') || c.signals.includes('phone') || c.signals.includes('website');
+    const corroboratedCandidates = probableCandidates.filter(hasRealCorroboration);
+
+    if (corroboratedCandidates.length === 0) {
+      console.log(`[InstagramValidation] Candidatos prováveis para "${lead.businessName}" sao so palpite sem confirmação real de cidade/telefone/site - rejeitados por segurança.`);
+    }
+
+    const deterministicWinner = corroboratedCandidates.length > 0 ? selectInstagramWinner(corroboratedCandidates) : null;
     if (deterministicWinner) {
       selected = deterministicWinner;
       validationMethod = `deterministic_${deterministicWinner.method}`;
       console.log(`[InstagramValidation] Selecionado por regra determinística: @${selected.profile.username} score=${selected.score}`);
-    } else {
-      const topProbable = probableCandidates.slice(0, 3);
+    } else if (corroboratedCandidates.length > 0) {
+      const topProbable = corroboratedCandidates.slice(0, 3);
       const aiLead = {
         businessName: lead.businessName,
         city: lead.city,
@@ -777,7 +1018,7 @@ export async function enrichLeadWithInstagram(
 
       console.log(`[InstagramValidation] Enviando ${aiCandidates.length} candidatos ambíguos para validação via IA...`);
       const aiResult = await disambiguateInstagramCandidates(aiLead, aiCandidates);
-      
+
       if (aiResult.matched && aiResult.username) {
         const match = probableCandidates.find(c => c.profile.username.toLowerCase() === aiResult.username?.toLowerCase());
         if (match) {
@@ -793,6 +1034,10 @@ export async function enrichLeadWithInstagram(
 
   if (!selected) {
     console.log(`[InstagramValidation] Nenhum perfil confirmado para: "${lead.businessName}"`);
+    await db.update(leads).set({
+      enrichmentStatus: 'FAILED',
+      enrichmentAttemptedAt: new Date(),
+    }).where(eq(leads.id, lead.id));
     return { updated: false, profile: null, method: null };
   }
 
@@ -832,6 +1077,8 @@ export async function enrichLeadWithInstagram(
     profileScore: score,
     profileAccepted: true,
     profileDiagnostics: JSON.stringify(diagnostics),
+    enrichmentStatus: 'DONE',
+    enrichmentAttemptedAt: now,
     updatedAt: now,
   } as any;
 

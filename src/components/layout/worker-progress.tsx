@@ -77,7 +77,6 @@ export function WorkerProgress() {
         </div>
 
         <div className="flex items-center gap-3">
-          {status && <span className="hidden text-xs text-neutral-500 sm:inline">{status.sentToday}/{status.dailyLimit} DMs hoje</span>}
           <Button type="button" size="sm" variant={running ? 'outline' : 'default'} onClick={handleToggle} disabled={isToggling || !status} className="h-8 gap-2">
             {running ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
             {isToggling ? 'Aguarde...' : running ? 'Pausar IA' : 'Iniciar IA'}

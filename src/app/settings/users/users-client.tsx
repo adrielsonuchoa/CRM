@@ -260,14 +260,14 @@ export function UsersClient({
           <div className="flex gap-1 border-b border-neutral-200 dark:border-neutral-800">
             <button
               onClick={() => setActiveTab('dados')}
-              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${activeTab === 'dados' ? 'border-blue-600 text-blue-600' : 'border-transparent text-neutral-500 hover:text-neutral-700'}`}
+              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${activeTab === 'dados' ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-200'}`}
             >
               Dados
             </button>
             <button
               onClick={() => setActiveTab('permissoes')}
               disabled={isEditingSelf}
-              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px disabled:opacity-40 disabled:cursor-not-allowed ${activeTab === 'permissoes' ? 'border-blue-600 text-blue-600' : 'border-transparent text-neutral-500 hover:text-neutral-700'}`}
+              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px disabled:opacity-40 disabled:cursor-not-allowed ${activeTab === 'permissoes' ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-200'}`}
               title={isEditingSelf ? 'Você não pode alterar suas próprias permissões.' : undefined}
             >
               Permissões {!isEditingSelf && `(${form.permissions.size})`}

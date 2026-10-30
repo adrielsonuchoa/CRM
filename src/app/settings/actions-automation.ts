@@ -12,6 +12,8 @@ import {
   enrichLeadViaBrowser,
   testWorkerReadiness,
   getRecentWorkerActivities,
+  startTargetedProspecting,
+  cancelTargetedProspecting,
 } from '@/lib/browser-worker';
 import { testMetaConnection, getMetaApiStatusConfig } from '@/lib/meta-api';
 import { revalidatePath } from 'next/cache';
@@ -204,6 +206,32 @@ export async function cancelPreparedDmAction(leadId: string) {
     description: 'Cancelou a DM preparada pelo Instagram.',
   });
   return result;
+}
+
+// Busca direcionada (tela de Prospeccao, "Quantidade de leads desejados").
+// Reaproveita a mesma permissao ja usada pra Iniciar/Pausar a automacao -
+// e a mesma capacidade (controlar a descoberta de leads), so que sob
+// demanda em vez de continua.
+export async function startTargetedProspectingAction(desiredCount: number) {
+  const { user, denied } = await gate('AUTOMATION_START');
+  if (denied) return denied;
+
+  const result = await startTargetedProspecting(desiredCount);
+  await logAudit({
+    userId: user.id,
+    userName: user.name,
+    action: 'PROSPECTING_TARGETED_STARTED',
+    category: 'AUTOMATION',
+    description: `Iniciou busca direcionada de ${desiredCount} leads com contato verificável.`,
+  });
+  revalidatePath('/prospecting');
+  return result;
+}
+
+export async function cancelTargetedProspectingAction() {
+  const { denied } = await gate('AUTOMATION_PAUSE');
+  if (denied) return denied;
+  return cancelTargetedProspecting();
 }
 
 export async function testMetaIntegrationAction() {

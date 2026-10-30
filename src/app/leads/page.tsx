@@ -1,6 +1,6 @@
 import { db } from '@/db';
-import { leads } from '@/db/schema';
-import { desc } from 'drizzle-orm';
+import { leads, activities } from '@/db/schema';
+import { desc, eq } from 'drizzle-orm';
 import { LeadsTable } from './leads-table';
 
 export const metadata = {
@@ -11,6 +11,26 @@ export const dynamic = 'force-dynamic';
 
 export default async function LeadsPage() {
   const allLeads = await db.select().from(leads).orderBy(desc(leads.createdAt));
+
+  // Última mensagem gerada por IA de cada lead (pra pré-preencher o link do
+  // WhatsApp) - uma query só pra todos os leads, em vez de N+1.
+  const generatedMessages = await db
+    .select({ leadId: activities.leadId, content: activities.content })
+    .from(activities)
+    .where(eq(activities.type, 'MESSAGE_GENERATED'))
+    .orderBy(desc(activities.createdAt));
+
+  const lastMessageByLead = new Map<string, string>();
+  for (const row of generatedMessages) {
+    if (row.content && !lastMessageByLead.has(row.leadId)) {
+      lastMessageByLead.set(row.leadId, row.content);
+    }
+  }
+
+  const leadsWithMessage = allLeads.map((lead) => ({
+    ...lead,
+    lastGeneratedMessage: lastMessageByLead.get(lead.id) ?? null,
+  }));
 
   return (
     <div className="space-y-6">
@@ -23,7 +43,7 @@ export default async function LeadsPage() {
         </div>
       </div>
 
-      <LeadsTable initialLeads={allLeads} />
+      <LeadsTable initialLeads={leadsWithMessage} />
     </div>
   );
 }

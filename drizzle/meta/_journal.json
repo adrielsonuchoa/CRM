@@ -47,15 +47,29 @@
     {
       "idx": 6,
       "version": "6",
-      "when": 1788366199683,
-      "tag": "0006_redundant_hawkeye",
+      "when": 1788000000000,
+      "tag": "0006_more_lead_diagnostics",
       "breakpoints": true
     },
     {
       "idx": 7,
       "version": "6",
+      "when": 1788366199683,
+      "tag": "0006_redundant_hawkeye",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
       "when": 1788404093380,
       "tag": "0007_create_audit_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789000000000,
+      "tag": "0008_targeted_prospecting",
       "breakpoints": true
     }
   ]

@@ -26,6 +26,11 @@ export const leads = sqliteTable('leads', {
   profileSnippet: text('profile_snippet'),
   postsCount: integer('posts_count'),
   profileDiagnostics: text('profile_diagnostics'), // JSON string with detailed diagnostics
+  // Ciclo de vida do enriquecimento de Instagram deste lead - cache pra nao
+  // refazer a busca externa, e recuperacao de leads travados em IN_PROGRESS
+  // por um crash. Valores: PENDING | IN_PROGRESS | DONE | FAILED
+  enrichmentStatus: text('enrichment_status').default('PENDING'),
+  enrichmentAttemptedAt: integer('enrichment_attempted_at', { mode: 'timestamp' }),
   rating: real('rating'),
   reviewCount: integer('review_count'),
   instagramActive: integer('instagram_active', { mode: 'boolean' }),
@@ -145,6 +150,17 @@ export const workerState = sqliteTable('worker_state', {
   pausedReason: text('paused_reason'),
   dryRun: integer('dry_run', { mode: 'boolean' }).default(true),
   startedAt: integer('started_at', { mode: 'timestamp' }),
+  // Progresso de uma busca direcionada em andamento (tela de Prospeccao,
+  // "Quantidade de leads desejados"). progressRunId nulo = nenhuma busca
+  // direcionada ativa - e o sinal que o cliente usa pra mostrar/esconder o
+  // modal de progresso.
+  progressRunId: text('progress_run_id'),
+  progressTarget: integer('progress_target'),
+  progressFound: integer('progress_found').default(0),
+  progressInstagramFound: integer('progress_instagram_found').default(0),
+  progressValidated: integer('progress_validated').default(0),
+  progressDiscarded: integer('progress_discarded').default(0),
+  progressPending: integer('progress_pending').default(0),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
