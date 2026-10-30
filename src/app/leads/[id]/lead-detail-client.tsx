@@ -6,12 +6,15 @@ import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
-import { addLeadNote, updateLeadStage } from '@/app/actions';
+import { Input } from '@/components/ui/input';
+import { addLeadNote, markMessageSent, updateLeadStage } from '@/app/actions';
+import { completeTaskAction, createTaskAction } from '@/app/tasks/actions';
 import { buildWhatsAppUrl } from '@/lib/phone';
+import { buildMailtoUrl } from '@/lib/email';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import {
-  AtSign, Phone, MessageCircle, ExternalLink, MapPin,
+  AtSign, Phone, MessageCircle, ExternalLink, MapPin, Mail, ListTodo, Check,
   CheckCircle2, AlertTriangle, Clock, Tag, StickyNote, Activity
 } from 'lucide-react';
 
@@ -73,7 +76,8 @@ type Lead = {
   estimatedSize: string | null; currentSystem: string | null; painPoints: string | null;
   notes: string | null; source: string | null; leadScore: number | null;
   qualificationStatus: string | null; pipelineStage: string;
-  firstContactAt: Date | null; lastContactAt: Date | null; doNotContact: boolean | null;
+  firstContactAt: Date | null; lastContactAt: Date | null; nextFollowUpAt: Date | null;
+  doNotContact: boolean | null;
   createdAt: Date; updatedAt: Date;
 };
 
@@ -83,12 +87,24 @@ type Activity = {
   createdAt: Date;
 };
 
-export function LeadDetailClient({ lead, activities }: { lead: Lead; activities: Activity[] }) {
+type LeadTask = { id: string; type: string; title: string; notes: string | null; dueAt: Date | null };
+
+type ExternalChannel = 'WHATSAPP' | 'EMAIL';
+const EXTERNAL_CHANNEL_LABELS: Record<ExternalChannel, string> = { WHATSAPP: 'WhatsApp', EMAIL: 'e-mail' };
+
+export function LeadDetailClient({ lead, activities, tasks }: { lead: Lead; activities: Activity[]; tasks: LeadTask[] }) {
   const [note, setNote] = useState('');
   const [selectedStage, setSelectedStage] = useState(lead.pipelineStage);
   const [isPendingNote, startNoteTransition] = useTransition();
   const [isPendingStage, startStageTransition] = useTransition();
+  const [isPendingContact, startContactTransition] = useTransition();
+  const [isPendingTask, startTaskTransition] = useTransition();
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  // Canal aberto em outra aba (WhatsApp/e-mail): o CRM não sabe se a
+  // mensagem foi enviada, então pergunta antes de registrar o contato.
+  const [openedChannel, setOpenedChannel] = useState<ExternalChannel | null>(null);
+  const [taskTitle, setTaskTitle] = useState('');
+  const [taskDueAt, setTaskDueAt] = useState('');
 
   let painPoints: string[] = [];
   try { if (lead.painPoints) painPoints = JSON.parse(lead.painPoints); } catch {}
@@ -97,6 +113,45 @@ export function LeadDetailClient({ lead, activities }: { lead: Lead; activities:
   const normalPhone = normalizePhone(lead.phone);
   const lastGeneratedMessage = activities.find((a) => a.type === 'MESSAGE_GENERATED' && a.content)?.content ?? null;
   const whatsAppUrl = buildWhatsAppUrl(lead.whatsapp ?? lead.phone, lastGeneratedMessage);
+  const mailtoUrl = buildMailtoUrl(lead.email, lead.businessName, lastGeneratedMessage);
+
+  function showFeedback(type: 'success' | 'error', message: string) {
+    setFeedback({ type, message });
+    if (type === 'success') setTimeout(() => setFeedback(null), 3000);
+  }
+
+  const handleRegisterContact = (channel: ExternalChannel) => {
+    startContactTransition(async () => {
+      const content = lastGeneratedMessage ?? `Mensagem enviada por ${EXTERNAL_CHANNEL_LABELS[channel]}.`;
+      const res = await markMessageSent(lead.id, content, channel);
+      setOpenedChannel(null);
+      if (res.success) showFeedback('success', `Contato por ${EXTERNAL_CHANNEL_LABELS[channel]} registrado.`);
+      else showFeedback('error', res.error ?? 'Falha ao registrar contato.');
+    });
+  };
+
+  const handleCreateTask = () => {
+    if (!taskTitle.trim()) return;
+    startTaskTransition(async () => {
+      const dueAtIso = taskDueAt ? new Date(taskDueAt).toISOString() : null;
+      const res = await createTaskAction(lead.id, taskTitle.trim(), dueAtIso);
+      if (res.success) {
+        setTaskTitle('');
+        setTaskDueAt('');
+        showFeedback('success', 'Tarefa criada.');
+      } else {
+        showFeedback('error', res.error ?? 'Falha ao criar tarefa.');
+      }
+    });
+  };
+
+  const handleCompleteTask = (taskId: string) => {
+    startTaskTransition(async () => {
+      const res = await completeTaskAction(taskId);
+      if (res.success) showFeedback('success', 'Tarefa concluída.');
+      else showFeedback('error', res.error ?? 'Falha ao concluir tarefa.');
+    });
+  };
 
   function getScoreColor() {
     if (!lead.leadScore) return 'text-neutral-400';
@@ -206,7 +261,7 @@ export function LeadDetailClient({ lead, activities }: { lead: Lead; activities:
               )}
 
               {whatsAppUrl ? (
-                <a href={whatsAppUrl} target="whatsapp-web" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+                <a href={whatsAppUrl} target="whatsapp-web" onClick={() => setOpenedChannel('WHATSAPP')} className={buttonVariants({ variant: 'outline', size: 'sm' })}>
                   <MessageCircle className="w-4 h-4 mr-1.5 text-green-600" />
                   WhatsApp
                   <ExternalLink className="w-3 h-3 ml-1 opacity-60" />
@@ -215,6 +270,18 @@ export function LeadDetailClient({ lead, activities }: { lead: Lead; activities:
                 <Button variant="outline" size="sm" disabled title="Telefone não cadastrado">
                   <MessageCircle className="w-4 h-4 mr-1.5 opacity-40" />
                   Sem WhatsApp
+                </Button>
+              )}
+
+              {mailtoUrl ? (
+                <a href={mailtoUrl} onClick={() => setOpenedChannel('EMAIL')} className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+                  <Mail className="w-4 h-4 mr-1.5" />
+                  E-mail
+                </a>
+              ) : (
+                <Button variant="outline" size="sm" disabled title="E-mail não cadastrado">
+                  <Mail className="w-4 h-4 mr-1.5 opacity-40" />
+                  Sem e-mail
                 </Button>
               )}
 
@@ -229,6 +296,73 @@ export function LeadDetailClient({ lead, activities }: { lead: Lead; activities:
                   {lead.phone}
                 </Button>
               )}
+            </CardContent>
+            {openedChannel && (
+              <CardContent className="px-4 pb-4 pt-0">
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
+                  <span>Você enviou a mensagem por {EXTERNAL_CHANNEL_LABELS[openedChannel]}? Registrar o contato agenda o próximo follow-up.</span>
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={() => handleRegisterContact(openedChannel)} disabled={isPendingContact || !!lead.doNotContact}>
+                      {isPendingContact ? 'Registrando...' : 'Sim, registrar'}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setOpenedChannel(null)} disabled={isPendingContact}>
+                      Não
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            )}
+          </Card>
+
+          {/* Tasks */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <ListTodo className="w-5 h-5" />
+                Tarefas e follow-ups
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {tasks.length === 0 ? (
+                <p className="text-sm text-neutral-400 italic">Nenhuma tarefa pendente.</p>
+              ) : (
+                <div className="divide-y divide-neutral-100 dark:divide-neutral-800">
+                  {tasks.map((task) => (
+                    <div key={task.id} className="flex items-center justify-between gap-3 py-2 first:pt-0">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">{task.title}</p>
+                        <p className="text-xs text-neutral-500">
+                          {task.type === 'FOLLOW_UP' ? 'Follow-up' : 'Tarefa'}
+                          {task.dueAt && ` · ${format(new Date(task.dueAt), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })}`}
+                        </p>
+                      </div>
+                      <Button size="sm" variant="outline" onClick={() => handleCompleteTask(task.id)} disabled={isPendingTask}>
+                        <Check className="w-3.5 h-3.5 mr-1" />
+                        Concluir
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <Separator />
+              <div className="flex flex-wrap gap-2">
+                <Input
+                  value={taskTitle}
+                  onChange={(e) => setTaskTitle(e.target.value)}
+                  placeholder="Nova tarefa (ex.: ligar para o dono)"
+                  className="flex-1 min-w-[180px]"
+                />
+                <Input
+                  type="datetime-local"
+                  value={taskDueAt}
+                  onChange={(e) => setTaskDueAt(e.target.value)}
+                  className="w-auto"
+                  aria-label="Data da tarefa"
+                />
+                <Button size="sm" onClick={handleCreateTask} disabled={!taskTitle.trim() || isPendingTask}>
+                  {isPendingTask ? 'Salvando...' : 'Adicionar'}
+                </Button>
+              </div>
             </CardContent>
           </Card>
 
@@ -382,6 +516,7 @@ export function LeadDetailClient({ lead, activities }: { lead: Lead; activities:
                 ['Criado em', lead.createdAt],
                 ['Primeiro contato', lead.firstContactAt],
                 ['Último contato', lead.lastContactAt],
+                ['Próximo follow-up', lead.nextFollowUpAt],
               ].map(([label, date]) => (
                 <div key={label as string} className="flex justify-between border-b border-neutral-100 dark:border-neutral-800 pb-2 last:border-0">
                   <span className="text-neutral-500">{label as string}</span>

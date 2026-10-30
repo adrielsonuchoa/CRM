@@ -5,6 +5,7 @@ import { db } from '@/db';
 import { activities, leads, settings, webhookEvents } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { sendInstagramMessageViaApi } from '@/lib/meta-api';
+import { cancelPendingFollowUps } from '@/lib/follow-ups';
 import { getOpenAIClient, getAiModel, isAiConfigured } from '@/lib/ai-client';
 import { getReasoningEffort, isReasoningModel } from '@/lib/approach-message';
 
@@ -142,6 +143,7 @@ async function handleInboundMessage(senderId: string, senderUsername: string | u
     createdAt: now,
   });
   console.log('[META] Mensagem recebida');
+  await cancelPendingFollowUps(leadId, 'Cancelado: lead respondeu.');
 
   let suggestedReply = '';
   const openai = getOpenAI();

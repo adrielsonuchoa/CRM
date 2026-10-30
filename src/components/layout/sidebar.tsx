@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { signOut } from 'next-auth/react';
-import { LayoutDashboard, Users, Kanban, ClipboardList, Settings, Store, ScrollText, LogOut } from 'lucide-react';
+import { LayoutDashboard, Users, Kanban, ClipboardList, Settings, Store, ScrollText, LogOut, ListTodo } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import type { CurrentUser } from '@/lib/auth-helpers';
@@ -25,6 +25,7 @@ const navItems = [
   { name: 'Fila de Prospecção', href: '/prospecting', icon: ClipboardList },
   { name: 'Pipeline', href: '/pipeline', icon: Kanban },
   { name: 'Leads', href: '/leads', icon: Users },
+  { name: 'Tarefas', href: '/tasks', icon: ListTodo },
   { name: 'Configurações', href: '/settings', icon: Settings },
 ];
 

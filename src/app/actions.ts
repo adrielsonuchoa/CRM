@@ -1,12 +1,18 @@
 'use server';
 
 import { db } from '@/db';
-import { leads, activities } from '@/db/schema';
+import { leads, activities, tasks } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import crypto from 'crypto';
 import { requirePermission, AuthError, ForbiddenError } from '@/lib/auth-helpers';
 import { logAudit } from '@/lib/audit-log';
+import { cancelPendingFollowUps, FOLLOW_UP_STAGE, scheduleFollowUpAfterContact } from '@/lib/follow-ups';
+import { PRE_CONTACT_STAGES } from '@/lib/lead-contact';
+
+export type ContactChannel = 'INSTAGRAM' | 'WHATSAPP' | 'EMAIL';
+const CONTACT_CHANNELS: ContactChannel[] = ['INSTAGRAM', 'WHATSAPP', 'EMAIL'];
+const CHANNEL_LABELS: Record<ContactChannel, string> = { INSTAGRAM: 'Instagram', WHATSAPP: 'WhatsApp', EMAIL: 'e-mail' };
 
 // Erros de autenticação/permissão viram uma resposta amigável ({success:
 // false, error}) em vez de estourar um erro genérico pro usuário — mas o
@@ -47,6 +53,10 @@ export async function updateLeadStage(leadId: string, newStage: string) {
       metadata: { from: oldStage, to: newStage },
     });
 
+    if (newStage !== FOLLOW_UP_STAGE) {
+      await cancelPendingFollowUps(leadId, `Cancelado: lead movido para ${newStage}.`);
+    }
+
     revalidatePath('/pipeline');
     revalidatePath('/');
     revalidatePath(`/leads/${leadId}`);
@@ -59,20 +69,27 @@ export async function updateLeadStage(leadId: string, newStage: string) {
   }
 }
 
-export async function markMessageSent(leadId: string, messageSent: string) {
+export async function markMessageSent(leadId: string, messageSent: string, channel: ContactChannel = 'INSTAGRAM') {
   try {
     const user = await requirePermission('LEAD_MARK_SENT');
+    if (!CONTACT_CHANNELS.includes(channel)) return { success: false, error: 'Canal inválido.' };
 
     const existing = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
     const lead = existing[0];
     if (!lead) return { success: false, error: 'Lead não encontrado.' };
+    if (lead.doNotContact) return { success: false, error: 'Lead marcado como Não Contatar.' };
 
     const now = new Date();
     const oldStage = lead.pipelineStage;
+    // Só avança pra CONTATO REALIZADO quem ainda não tinha sido abordado:
+    // um WhatsApp enviado pra um lead já em NEGOCIAÇÃO não pode fazer ele
+    // voltar de estágio.
+    const advanceStage = (PRE_CONTACT_STAGES as readonly string[]).includes(oldStage);
+    const newStage = advanceStage ? FOLLOW_UP_STAGE : oldStage;
 
     await db.update(leads)
       .set({
-        pipelineStage: 'CONTATO REALIZADO',
+        pipelineStage: newStage,
         firstContactAt: lead.firstContactAt ?? now,
         lastContactAt: now,
         updatedAt: now,
@@ -84,19 +101,19 @@ export async function markMessageSent(leadId: string, messageSent: string) {
         id: crypto.randomUUID(),
         leadId,
         type: 'MESSAGE_SENT',
-        channel: 'INSTAGRAM',
+        channel,
         direction: 'OUTBOUND',
         content: messageSent,
         createdAt: now,
       },
-      {
+      ...(advanceStage ? [{
         id: crypto.randomUUID(),
         leadId,
         type: 'PIPELINE_CHANGED',
-        content: `Pipeline atualizado: ${oldStage} → CONTATO REALIZADO`,
-        metadata: JSON.stringify({ from: oldStage, to: 'CONTATO REALIZADO' }),
+        content: `Pipeline atualizado: ${oldStage} → ${newStage}`,
+        metadata: JSON.stringify({ from: oldStage, to: newStage }),
         createdAt: now,
-      },
+      }] : []),
     ]);
 
     await logAudit({
@@ -106,11 +123,15 @@ export async function markMessageSent(leadId: string, messageSent: string) {
       category: 'MESSAGES',
       entityType: 'LEAD',
       entityId: leadId,
-      description: `Registrou envio de mensagem para "${lead.businessName}".`,
+      description: `Registrou envio de mensagem por ${CHANNEL_LABELS[channel]} para "${lead.businessName}".`,
+      metadata: { channel },
     });
+
+    await scheduleFollowUpAfterContact(leadId, now);
 
     revalidatePath('/prospecting');
     revalidatePath('/pipeline');
+    revalidatePath('/tasks');
     revalidatePath('/');
     revalidatePath(`/leads/${leadId}`);
     return { success: true };
@@ -151,6 +172,8 @@ export async function doNotContactLead(leadId: string) {
       entityId: leadId,
       description: `Marcou "${existing[0]?.businessName ?? leadId}" como Não Contatar.`,
     });
+
+    await cancelPendingFollowUps(leadId, 'Cancelado: lead marcado como Não Contatar.');
 
     revalidatePath('/prospecting');
     revalidatePath('/pipeline');
@@ -216,6 +239,7 @@ export async function clearAllLeadsAction() {
     const existingLeads = await db.select({ id: leads.id }).from(leads);
     const count = existingLeads.length;
 
+    await db.delete(tasks);
     await db.delete(activities);
     await db.delete(leads);
 

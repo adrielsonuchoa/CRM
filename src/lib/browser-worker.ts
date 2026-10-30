@@ -10,6 +10,7 @@ import { discoverGeoapifyPlaces } from '@/lib/prospecting-sources';
 import { enrichLeadWithInstagram, searchInstagramUsernames } from '@/lib/instagram-enrichment';
 import { isAiConfigured } from '@/lib/ai-client';
 import { hasVerifiableContact, NO_CONTACT_STAGE, PRE_CONTACT_STAGES } from '@/lib/lead-contact';
+import { scheduleFollowUpAfterContact } from '@/lib/follow-ups';
 
 // O pacote 'playwright' so pode ser carregado sob demanda: um import
 // estatico no topo do arquivo quebra qualquer rota da Vercel que importe
@@ -2001,6 +2002,7 @@ export async function confirmPreparedDmViaBrowser(leadId: string, requestedMessa
       metadata: JSON.stringify({ provider: 'BROWSER', via: 'PLAYWRIGHT_CDP', confirmedInCrm: true }),
       createdAt: now,
     });
+    await scheduleFollowUpAfterContact(leadId, now);
     await incrementCounter();
     await setWorkerState({ status: 'ATIVO', activity: `DM enviada para @${lead.instagramUsername}`, lastError: null });
     return { success: true };

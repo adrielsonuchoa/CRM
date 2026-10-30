@@ -1,8 +1,9 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { db } from '@/db';
-import { leads, demos } from '@/db/schema';
-import { count, desc, sql } from 'drizzle-orm';
-import { Store, MessagesSquare, CheckCircle2, TrendingUp, CalendarCheck, Users } from 'lucide-react';
+import { leads, demos, tasks, activities } from '@/db/schema';
+import { and, count, desc, eq, gte, lt, sql } from 'drizzle-orm';
+import { Store, MessagesSquare, CheckCircle2, TrendingUp, CalendarCheck, Users, AlertTriangle, ListTodo, Send } from 'lucide-react';
+import { TASK_STATUS } from '@/lib/follow-ups';
 import Link from 'next/link';
 import { getRecentWorkerActivities, getWorkerStatus } from '@/lib/browser-worker';
 import { DashboardWorkerStatus } from './dashboard-worker-status';
@@ -14,6 +15,21 @@ export const metadata = {
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
+  const startOfToday = new Date(new Date().setHours(0, 0, 0, 0));
+  const startOfTomorrow = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
+  const sevenDaysAgo = new Date(startOfToday.getTime() - 6 * 24 * 60 * 60 * 1000);
+
+  // Disparado antes das consultas principais e aguardado depois: roda em
+  // paralelo com elas em vez de somar mais uma ida ao banco.
+  const followUpStatsPromise = Promise.all([
+    db.select({ count: count() }).from(tasks).where(and(eq(tasks.status, TASK_STATUS.PENDING), lt(tasks.dueAt, startOfToday))),
+    db.select({ count: count() }).from(tasks).where(and(eq(tasks.status, TASK_STATUS.PENDING), gte(tasks.dueAt, startOfToday), lt(tasks.dueAt, startOfTomorrow))),
+    db.select({ channel: activities.channel, count: count() })
+      .from(activities)
+      .where(and(eq(activities.type, 'MESSAGE_SENT'), gte(activities.createdAt, sevenDaysAgo)))
+      .groupBy(activities.channel),
+  ]);
+
   const [
     totalResult,
     qualifiedResult,
@@ -60,6 +76,14 @@ export default async function DashboardPage() {
       source: leads.source,
     }).from(leads).orderBy(desc(leads.createdAt)).limit(10),
   ]);
+
+  const [overdueTasksResult, todayTasksResult, sentByChannel] = await followUpStatsPromise;
+  const overdueTasks = overdueTasksResult[0].count;
+  const todayTasks = todayTasksResult[0].count;
+  const sentLast7Days = sentByChannel.reduce((sum, row) => sum + row.count, 0);
+  const sentByChannelLabel = sentByChannel
+    .map((row) => `${row.channel ?? 'OUTRO'}: ${row.count}`)
+    .join(' · ');
 
   const total = totalResult[0].count;
   const qualified = qualifiedResult[0].count;
@@ -110,6 +134,42 @@ export default async function DashboardPage() {
             </Card>
           </Link>
         ))}
+      </div>
+
+      {/* Acompanhamento */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <Link href="/tasks">
+          <Card className={`hover:border-blue-300 transition-colors cursor-pointer ${overdueTasks > 0 ? 'border-red-200 dark:border-red-900' : ''}`}>
+            <CardHeader className="flex flex-row items-center justify-between pb-1 pt-3 px-4">
+              <CardTitle className="text-xs font-medium text-neutral-500">Follow-ups atrasados</CardTitle>
+              <AlertTriangle className={`w-4 h-4 ${overdueTasks > 0 ? 'text-red-600' : 'text-neutral-400'}`} />
+            </CardHeader>
+            <CardContent className="pb-3 px-4">
+              <div className={`text-2xl font-bold ${overdueTasks > 0 ? 'text-red-600' : ''}`}>{overdueTasks}</div>
+            </CardContent>
+          </Card>
+        </Link>
+        <Link href="/tasks">
+          <Card className="hover:border-blue-300 transition-colors cursor-pointer">
+            <CardHeader className="flex flex-row items-center justify-between pb-1 pt-3 px-4">
+              <CardTitle className="text-xs font-medium text-neutral-500">Tarefas para hoje</CardTitle>
+              <ListTodo className="w-4 h-4 text-blue-600" />
+            </CardHeader>
+            <CardContent className="pb-3 px-4">
+              <div className="text-2xl font-bold">{todayTasks}</div>
+            </CardContent>
+          </Card>
+        </Link>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-1 pt-3 px-4">
+            <CardTitle className="text-xs font-medium text-neutral-500">Mensagens enviadas (7 dias)</CardTitle>
+            <Send className="w-4 h-4 text-indigo-600" />
+          </CardHeader>
+          <CardContent className="pb-3 px-4">
+            <div className="text-2xl font-bold">{sentLast7Days}</div>
+            {sentByChannelLabel && <p className="text-xs text-neutral-500 mt-1">{sentByChannelLabel}</p>}
+          </CardContent>
+        </Card>
       </div>
 
       <Card>

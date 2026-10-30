@@ -1,7 +1,8 @@
 import { db } from '@/db';
-import { leads, activities } from '@/db/schema';
-import { eq, desc } from 'drizzle-orm';
+import { leads, activities, tasks } from '@/db/schema';
+import { and, asc, eq, desc } from 'drizzle-orm';
 import { notFound } from 'next/navigation';
+import { TASK_STATUS } from '@/lib/follow-ups';
 import { LeadDetailClient } from './lead-detail-client';
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }) {
@@ -17,12 +18,19 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
 
   if (!lead) notFound();
 
-  const leadActivities = await db
-    .select()
-    .from(activities)
-    .where(eq(activities.leadId, id))
-    .orderBy(desc(activities.createdAt))
-    .limit(50);
+  const [leadActivities, pendingTasks] = await Promise.all([
+    db
+      .select()
+      .from(activities)
+      .where(eq(activities.leadId, id))
+      .orderBy(desc(activities.createdAt))
+      .limit(50),
+    db
+      .select({ id: tasks.id, type: tasks.type, title: tasks.title, notes: tasks.notes, dueAt: tasks.dueAt })
+      .from(tasks)
+      .where(and(eq(tasks.leadId, id), eq(tasks.status, TASK_STATUS.PENDING)))
+      .orderBy(asc(tasks.dueAt)),
+  ]);
 
-  return <LeadDetailClient lead={lead} activities={leadActivities} />;
+  return <LeadDetailClient lead={lead} activities={leadActivities} tasks={pendingTasks} />;
 }
