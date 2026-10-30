@@ -35,6 +35,16 @@ export function getAiModel() {
   return getRuntimeEnv('OPENROUTER_MODEL') || 'google/gemini-3.5-flash-lite';
 }
 
-export function getMessageModel() {
-  return getRuntimeEnv('OPENROUTER_MESSAGE_MODEL') || getRuntimeEnv('OPENROUTER_MODEL') || 'google/gemini-3.5-flash-lite';
+export function isReasoningModel(model: string) {
+  return /gemini-3|gemini-2\.5|gpt-oss|o1|o3|reasoning/i.test(model);
+}
+
+// Modelos Gemini (e outros modelos "reasoning") gastam parte do orçamento de
+// tokens de saída com "thinking" interno antes de escrever a resposta final.
+// reasoning_effort limita esse gasto. Gemini 2.5 aceita 'none' (desliga o
+// thinking); Gemini 3.x exige no mínimo 'low'.
+export function getReasoningEffort(model: string): 'none' | 'low' | undefined {
+  if (!isReasoningModel(model)) return undefined;
+  if (/gemini-2\.5/i.test(model)) return 'none';
+  return 'low';
 }

@@ -6,12 +6,11 @@ import { db } from '@/db';
 import { activities, leads, settings } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import crypto from 'crypto';
-import { generateApproachMessage, getReasoningEffort, isReasoningModel } from '@/lib/approach-message';
-import { getOpenAIClient as getOpenAI, getAiModel, getMessageModel } from '@/lib/ai-client';
+import { getOpenAIClient as getOpenAI, getAiModel, getReasoningEffort, isReasoningModel } from '@/lib/ai-client';
 import { requirePermission, AuthError, ForbiddenError } from '@/lib/auth-helpers';
 import { logAudit } from '@/lib/audit-log';
 
-// IMPORTANTE: analyzeLeadAction e generateMessageAction (abaixo) NÃO levam
+// IMPORTANTE: analyzeLeadAction (abaixo) NÃO leva
 // checagem de permissão diretamente — elas são chamadas tanto pela tela de
 // Fila de Prospecção (sessão de usuário via HTTP) QUANTO pelo processo de
 // automação em segundo plano (scripts/browser-worker.ts, rodando fora de
@@ -300,45 +299,6 @@ Informações institucionais da Sirrus: ${((await db.select().from(settings).lim
   }
 }
 
-export async function generateMessageAction(leadId: string, strategy: string = 'Consultiva') {
-  try {
-    const openai = getOpenAI();
-    const leadRecord = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
-    const lead = leadRecord[0];
-    if (!lead) throw new Error('Lead não encontrado.');
-
-    const settingsRecord = await db.select().from(settings).limit(1);
-    const institutionalText = settingsRecord[0]?.institutionalText?.trim() || 'Não configurado.';
-
-    const { message } = await withTimeout(
-      generateApproachMessage({
-        client: openai,
-        model: getMessageModel(),
-        fallbackModel: getAiModel(),
-        lead,
-        institutionalText,
-        strategy,
-      }),
-      45000, // ampliado de 25s: sobra para o retry interno (2 tentativas) + latencia de rede
-    );
-
-    await db.insert(activities).values({
-      id: crypto.randomUUID(),
-      leadId,
-      type: 'MESSAGE_GENERATED',
-      channel: 'INSTAGRAM',
-      content: message,
-      metadata: JSON.stringify({ strategy }),
-      createdAt: new Date(),
-    });
-
-    return { success: true, message };
-  } catch (error: any) {
-    console.error('Error generating message:', error);
-    return { success: false, error: error.message };
-  }
-}
-
 // Gera usernames plausiveis do Instagram via IA - chamada unica e rapida
 // (~1-2s no OpenRouter) que substitui parte da tentativa-e-erro mecanica de
 // guessInstagramUsernames (que so combina palavras do nome, sem nenhum
@@ -493,8 +453,7 @@ Retorne estritamente um JSON no seguinte formato:
 // ---------------------------------------------------------------------------
 // Wrappers com checagem de permissão — usar estes a partir de componentes de
 // UI (telas), nunca os de cima diretamente. Ver comentário no topo do
-// arquivo sobre por que analyzeLeadAction/generateMessageAction em si não
-// fazem essa checagem.
+// arquivo sobre por que analyzeLeadAction em si não faz essa checagem.
 // ---------------------------------------------------------------------------
 
 export async function analyzeLeadActionAuthorized(leadId: string) {
@@ -520,28 +479,3 @@ export async function analyzeLeadActionAuthorized(leadId: string) {
     throw error;
   }
 }
-
-export async function generateMessageActionAuthorized(leadId: string, strategy: string = 'Consultiva') {
-  try {
-    const user = await requirePermission('AI_GENERATE_MESSAGE');
-    const result = await generateMessageAction(leadId, strategy);
-    if (result.success) {
-      await logAudit({
-        userId: user.id,
-        userName: user.name,
-        action: 'AI_MESSAGE_GENERATED',
-        category: 'MESSAGES',
-        entityType: 'LEAD',
-        entityId: leadId,
-        description: `Gerou uma mensagem de abordagem com IA (estratégia: ${strategy}).`,
-      });
-    }
-    return result;
-  } catch (error) {
-    if (error instanceof AuthError || error instanceof ForbiddenError) {
-      return { success: false, error: error.message };
-    }
-    throw error;
-  }
-}
-

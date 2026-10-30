@@ -221,7 +221,7 @@ export const users = sqliteTable('users', {
 export const userPermissions = sqliteTable('user_permissions', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  permissionKey: text('permission_key').notNull(), // ex.: LEAD_VIEW, AI_GENERATE_MESSAGE, INSTAGRAM_SEND_MESSAGE
+  permissionKey: text('permission_key').notNull(), // ex.: LEAD_VIEW, AI_ANALYZE_LEAD, INSTAGRAM_SEND_MESSAGE
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 }, (table) => {
   return {

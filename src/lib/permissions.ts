@@ -13,7 +13,6 @@ export type PermissionKey =
   | 'LEAD_DELETE_ALL'
   | 'VIEW_ALL_LEADS'
   | 'AI_ANALYZE_LEAD'
-  | 'AI_GENERATE_MESSAGE'
   | 'INSTAGRAM_SEND_MESSAGE'
   | 'INSTAGRAM_CANCEL_DM'
   | 'INSTAGRAM_PREVIEW_PROFILE'
@@ -57,7 +56,6 @@ export const PERMISSION_CATALOG: PermissionGroup[] = [
     category: 'Mensagens / IA',
     permissions: [
       { key: 'AI_ANALYZE_LEAD', label: 'Analisar lead com IA' },
-      { key: 'AI_GENERATE_MESSAGE', label: 'Gerar mensagem com IA' },
       { key: 'INSTAGRAM_PREVIEW_PROFILE', label: 'Visualizar perfil do Instagram' },
       { key: 'INSTAGRAM_SEND_MESSAGE', label: 'Enviar mensagem pelo Instagram' },
       { key: 'INSTAGRAM_CANCEL_DM', label: 'Cancelar DM preparada' },
@@ -114,7 +112,6 @@ export const PERMISSION_PRESETS: Record<string, PermissionKey[]> = {
     'LEAD_MARK_SENT',
     'LEAD_ENRICH',
     'AI_ANALYZE_LEAD',
-    'AI_GENERATE_MESSAGE',
     'INSTAGRAM_PREVIEW_PROFILE',
     'INSTAGRAM_SEND_MESSAGE',
     'INSTAGRAM_CANCEL_DM',

@@ -282,7 +282,7 @@ export function SettingsForm({
         <div className="rounded-lg border bg-neutral-50 dark:bg-neutral-900/50 p-5 space-y-4">
           {workerStatus.dryRun && (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
-              MODO DE TESTE ativo: pesquisa, analise e mensagens funcionam; envios reais ficam bloqueados.
+              MODO DE TESTE ativo: busca e análise funcionam; envios reais ficam bloqueados.
             </div>
           )}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
@@ -493,46 +493,14 @@ export function SettingsForm({
           <h2 className="text-xl font-semibold">Criterios avancados de prospeccao</h2>
         </div>
         <Separator />
-        <div className="space-y-2 rounded-md border p-3">
-          <Label>Modo operacional</Label>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <label className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm cursor-pointer">
-              <input
-                type="radio"
-                name="operationalMode"
-                value="ASSISTIDO"
-                defaultChecked={(s?.operationalMode ?? 'ASSISTIDO') === 'ASSISTIDO'}
-                className="h-4 w-4 mt-0.5"
-              />
-              <span>
-                <span className="font-medium">Assistido</span>
-                <br />
-                <span className="text-xs text-neutral-500">Descobre, analisa e prepara as mensagens. O envio de cada DM continua manual (voce revisa e confirma na fila de prospecção).</span>
-              </span>
-            </label>
-            <label className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm cursor-pointer">
-              <input
-                type="radio"
-                name="operationalMode"
-                value="SEMIAUTOMATICO"
-                defaultChecked={s?.operationalMode === 'SEMIAUTOMATICO'}
-                className="h-4 w-4 mt-0.5"
-              />
-              <span>
-                <span className="font-medium">Semi-automático</span>
-                <br />
-                <span className="text-xs text-neutral-500">Além de descobrir e analisar, também envia as mensagens sozinho (respeitando o limite diário e o intervalo mínimo definidos abaixo) e atualiza o pipeline. Só volta para a fila se você regredir o estágio do estabelecimento.</span>
-              </span>
-            </label>
-          </div>
-          <p className="text-xs text-neutral-500">
-            O modo semi-automático exige o Chrome aberto e conectado (CDP) com o Instagram autenticado, e só envia mensagens reais quando o MODO DE TESTE abaixo estiver desligado.
-          </p>
+        <div className="space-y-1 rounded-md border p-3 text-sm">
+          <Label>Modo operacional: Assistido</Label>
+          <p className="text-xs text-neutral-500">A automação descobre e qualifica leads (a IA é usada só nessa etapa). Cada mensagem é escrita e enviada por você na Fila de Prospecção.</p>
         </div>
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
           <label className="flex items-center gap-2">
             <input type="checkbox" name="prospectionDryRun" defaultChecked={s?.prospectionDryRun ?? true} className="h-4 w-4" />
-            MODO DE TESTE: gerar fila e mensagens sem enviar contatos reais
+            MODO DE TESTE: buscar e qualificar leads sem enviar contatos reais
           </label>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -590,7 +558,6 @@ export function SettingsForm({
             ['ignoreExistingLeads', 'Ignorar perfis ja existentes', s?.ignoreExistingLeads ?? true],
             ['ignoreAlreadyContacted', 'Ignorar perfis ja contatados', s?.ignoreAlreadyContacted ?? true],
             ['ignoreDuplicates', 'Ignorar duplicados', s?.ignoreDuplicates ?? true],
-            ['autoReplyEnabled', 'Resposta automatica desativada por padrao', s?.autoReplyEnabled ?? false],
           ].map(([name, label, checked]) => (
             <label key={name as string} className="flex items-center gap-2 rounded-md border px-3 py-2">
               <input type="checkbox" name={name as string} defaultChecked={Boolean(checked)} className="h-4 w-4" />

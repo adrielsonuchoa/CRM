@@ -5,7 +5,7 @@ import { db } from '@/db';
 import { activities, dailyActionCounters, leads, settings, workerState } from '@/db/schema';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import crypto from 'crypto';
-import { analyzeLeadAction, generateMessageAction } from '@/app/actions/ai';
+import { analyzeLeadAction } from '@/app/actions/ai';
 import { discoverGeoapifyPlaces } from '@/lib/prospecting-sources';
 import { enrichLeadWithInstagram, searchInstagramUsernames } from '@/lib/instagram-enrichment';
 import { isAiConfigured } from '@/lib/ai-client';
@@ -726,76 +726,6 @@ export async function startWorker(): Promise<{ success: boolean; message?: strin
   return { success: true, message: 'Automacao iniciada. O progresso sera atualizado nesta tela.' };
 }
 
-// Fila de envio automatico do modo SEMIAUTOMATICO. A "fila" nao e uma tabela
-// separada: e simplesmente todo lead com pipelineStage em
-// QUALIFICADO/PRONTO PARA CONTATO/AGUARDANDO_CONTATO (a mesma definicao ja
-// usada em getWorkerStatus para contar o tamanho da fila). Por isso, quando
-// o envio muda o estagio para CONTATO REALIZADO, o lead sai da fila sozinho;
-// e se o usuario regredir o estagio manualmente de volta para um desses tres,
-// ele volta a aparecer na fila sozinho tambem — sem nenhuma logica extra de
-// "readicionar".
-async function processAutomaticSendQueueOnce() {
-  // Mesmo motivo do inicio de runProspectingOnce: nao abre/usa o Chrome
-  // enquanto uma busca direcionada estiver ativa.
-  if (targetedRunActive) return;
-
-  const s = await getSettings();
-  if ((s?.operationalMode ?? 'ASSISTIDO') !== 'SEMIAUTOMATICO') return;
-
-  const dryRun = s?.prospectionDryRun ?? true;
-  if (dryRun) {
-    // Modo de teste: o worker continua descobrindo e preparando rascunhos de
-    // mensagem (via runProspectingOnce), mas nao envia nada sozinho. Isso
-    // evita reprocessar os mesmos leads a cada ciclo so para regenerar
-    // rascunho, ja que em modo de teste o estagio nunca avanca para tirar o
-    // lead da fila.
-    return;
-  }
-
-  const cdpCheck = await checkChromeConnection();
-  if (!cdpCheck.connected || !cdpCheck.username) {
-    await setWorkerState({ activity: 'Modo semi-automático aguardando Chrome com Instagram conectado para enviar as mensagens da fila.' });
-    return;
-  }
-
-  const counter = await getCounter();
-  if (counter.count >= counter.limit) return;
-
-  const queued = await db
-    .select({ id: leads.id })
-    .from(leads)
-    .where(sql`${leads.pipelineStage} IN ('QUALIFICADO', 'PRONTO PARA CONTATO', 'AGUARDANDO_CONTATO') AND ${leads.doNotContact} = 0 AND ${leads.instagramUsername} IS NOT NULL`)
-    .limit(Math.max(1, counter.limit - counter.count));
-
-  const intervalMs = Math.max(s?.minActionIntervalSeconds ?? 90, 15) * 1000;
-
-  for (const { id: leadId } of queued) {
-    const freshState = await ensureWorkerState();
-    if (freshState.status === 'PAUSADO') break;
-
-    const freshCounter = await getCounter();
-    if (freshCounter.count >= freshCounter.limit) break;
-
-    try {
-      // sendFirstDmViaBrowser prepara e digita a mensagem (mesma funcao usada
-      // no fluxo manual de "Preparar DM"); confirmPreparedDmViaBrowser e quem
-      // efetivamente aperta Enter e atualiza o pipeline para CONTATO
-      // REALIZADO. No fluxo manual, um humano ve o print da conversa entre
-      // essas duas etapas antes de confirmar; no modo semi-automatico as duas
-      // etapas sao encadeadas sem essa revisao, pois o objetivo aqui e
-      // exatamente o envio nao supervisionado.
-      const prepared = await sendFirstDmViaBrowser(leadId);
-      if (prepared.success && prepared.prepared && !prepared.dryRun && prepared.message) {
-        await confirmPreparedDmViaBrowser(leadId, prepared.message);
-      }
-    } catch (err: any) {
-      console.error('[ERROR] Envio automatico falhou para lead', leadId, err?.message ?? err);
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-}
-
 async function runWorkerLoop() {
   const intervalMs = Math.max(Number(process.env.BROWSER_WORKER_INTERVAL_MS ?? 60000), 15000);
 
@@ -828,12 +758,6 @@ async function runWorkerCycle(intervalMs: number): Promise<'paused' | 'continue'
     });
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
     return 'continue';
-  }
-
-  try {
-    await processAutomaticSendQueueOnce();
-  } catch (err: any) {
-    console.error('[ERROR] Falha no ciclo de envio automatico:', err?.message ?? err);
   }
 
   const postSendState = await ensureWorkerState();
@@ -1015,19 +939,6 @@ async function flushTargetedProgress(runId: string, counters: TargetedCounters, 
   }
 }
 
-const pendingMessageJobs = new Set<Promise<unknown>>();
-
-function trackMessageJob(job: Promise<unknown>) {
-  const tracked = job
-    .catch((err: any) => console.warn('[WORKER] Falha ao gerar mensagem em segundo plano:', err?.message ?? err))
-    .finally(() => pendingMessageJobs.delete(tracked));
-  pendingMessageJobs.add(tracked);
-}
-
-async function awaitPendingMessages() {
-  await Promise.allSettled(Array.from(pendingMessageJobs));
-}
-
 // Portao de contato (requisito 3) + qualificacao por IA, compartilhado
 // entre o loop continuo (runProspectingOnce) e a busca direcionada - assim
 // a regra de descarte "sem contato" so existe implementada uma vez.
@@ -1062,10 +973,6 @@ async function resolveLeadAfterEnrichment(
   if (analysis.success && typeof analysis.result?.score === 'number' && analysis.result.score >= minScore) {
     await db.update(leads).set({ pipelineStage: 'QUALIFICADO', updatedAt: new Date() })
       .where(and(eq(leads.id, lead.id), inArray(leads.pipelineStage, [...PRE_CONTACT_STAGES])));
-    // A redacao da mensagem nao influencia o resultado do lead - roda em
-    // paralelo com o proximo lead em vez de segurar a fila (awaitPendingMessages
-    // no fim de cada execucao garante que nada fica pela metade).
-    trackMessageJob(generateMessageAction(lead.id));
     return 'QUALIFIED';
   }
 
@@ -1320,7 +1227,6 @@ export async function runProspectingOnce() {
     if (enrichmentPage && enrichmentPage !== instagramPage) await enrichmentPage.close();
     await closeBackgroundSession(backgroundWorkerContext);
     await releaseBrowserConnection(browser);
-    await awaitPendingMessages();
     await setWorkerState({ status: 'AGUARDANDO', activity: `Execucao concluida: ${discovered} encontrados, ${qualified} qualificados` });
     currentWorkerLeadName = null;
     return { success: true, message: `Execucao concluida: ${discovered} encontrados, ${qualified} qualificados.` };
@@ -1519,7 +1425,6 @@ async function runTargetedProspecting(runId: string, target: number, s: typeof s
       });
     }
 
-    await awaitPendingMessages();
     await flushTargetedProgress(
       runId,
       counters,
@@ -1587,10 +1492,8 @@ export async function enrichLeadViaBrowser(leadId: string): Promise<{ success: b
       context = background.context;
       // A desambiguacao via IA (quando ha varios perfis de Instagram
       // candidatos parecidos) continua habilitada aqui - e necessaria pra
-      // descobrir qual e o perfil certo. O unico gasto de IA que fica
-      // reservado exclusivamente pro botao "Criar/Regenerar" e a REDACAO da
-      // mensagem de abordagem (generateMessageAction), nao a identificacao
-      // do perfil.
+      // descobrir qual e o perfil certo (a IA do CRM e usada so na busca e
+      // qualificacao de leads, nunca pra redigir mensagens).
       const result = await enrichLeadWithInstagram(background.page, lead);
       await closeBackgroundSession(context);
 
@@ -1737,8 +1640,7 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
     // Antes isso pausava o worker inteiro (status: 'PAUSADO'), o que parava
     // a prospeccao/descoberta junto com o envio de DMs - acoplamento
     // indevido, ja que agora a busca de leads e orientada por quantidade e
-    // independente do limite diario de envio. So o envio para;
-    // processAutomaticSendQueueOnce ja se autolimita sozinho.
+    // independente do limite diario de envio. So o envio para.
     await setWorkerState({ activity: 'Limite diario de DMs atingido', lastError: error, pausedReason: 'Limite diario' });
     return { success: false, error };
   }
@@ -1795,12 +1697,9 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
   }
 
   // "Preparar DM" (fluxo manual da Fila de Prospeccao) so deve abrir a
-  // conversa e deixar o campo pronto pra digitacao - gerar uma mensagem via
-  // IA aqui consumiria tokens do OpenRouter toda vez que o usuario so quer
-  // ver o perfil/abrir o chat. A geracao via IA agora acontece somente
-  // quando o usuario clica em "Criar/Regenerar" (generateMessageAction),
-  // que preenche o campo no CRM; o texto so chega de fato na conversa do
-  // Instagram no momento da confirmacao (confirmPreparedDmViaBrowser).
+  // conversa e deixar o campo pronto pra digitacao. O texto e escrito pelo
+  // usuario na Fila (ou parte do modelo fixo, sem IA) e so chega de fato na
+  // conversa do Instagram na confirmacao (confirmPreparedDmViaBrowser).
   let messageToSend = requestedMessage?.trim() ?? '';
   if (!messageToSend && lastGeneratedRows[0]?.content) messageToSend = lastGeneratedRows[0].content;
 

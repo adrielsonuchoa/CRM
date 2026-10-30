@@ -23,7 +23,6 @@ const SettingsSchema = z.object({
   role: z.string().trim().optional(),
   institutionalText: z.string().trim().optional(),
   aiAnalysisModel: z.string().trim().optional(),
-  aiMessageModel: z.string().trim().optional(),
   dailyQueueSize: z.coerce.number().int().min(1).max(50).optional(),
   minScoreForQueue: z.coerce.number().int().min(0).max(100).optional(),
   prospectingCities: z.string().trim().optional(),
@@ -39,10 +38,8 @@ const SettingsSchema = z.object({
   ignoreAlreadyContacted: z.coerce.boolean().optional(),
   ignoreDuplicates: z.coerce.boolean().optional(),
   prospectionDryRun: z.coerce.boolean().optional(),
-  autoReplyEnabled: z.coerce.boolean().optional(),
   followUpDays: z.coerce.number().int().min(1).max(30).optional(),
   maxFollowUps: z.coerce.number().int().min(0).max(10).optional(),
-  operationalMode: z.enum(['ASSISTIDO', 'SEMIAUTOMATICO']).optional(),
 });
 
 function listToJson(value: string | undefined) {
@@ -88,8 +85,7 @@ export async function saveSettingsAction(formData: FormData) {
       ignoreAlreadyContacted: parsed.data.ignoreAlreadyContacted ?? false,
       ignoreDuplicates: parsed.data.ignoreDuplicates ?? false,
       prospectionDryRun: parsed.data.prospectionDryRun ?? false,
-      autoReplyEnabled: parsed.data.autoReplyEnabled ?? false,
-      operationalMode: parsed.data.operationalMode ?? 'ASSISTIDO',
+      operationalMode: 'ASSISTIDO',
     };
 
     const existing = await db.select().from(settings).limit(1);

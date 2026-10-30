@@ -95,7 +95,7 @@ Obrigatorias conforme o uso:
 ```text
 DATABASE_URL ou TURSO_DATABASE_URL
 TURSO_AUTH_TOKEN
-OPENAI_API_KEY
+OPENROUTER_API_KEY (IA usada so na busca e qualificacao de leads)
 GEOAPIFY_API_KEY
 CHROME_CDP_URL
 META_ACCESS_TOKEN
@@ -104,7 +104,6 @@ META_WEBHOOK_VERIFY_TOKEN
 INSTAGRAM_ACCOUNT_ID
 INSTAGRAM_USERNAME
 PROSPECTION_DRY_RUN=true
-AUTO_REPLY=false
 ```
 
 Na tela Configuracoes, selecione Geoapify Places como fonte principal. A chave e obtida no painel do Geoapify em https://myprojects.geoapify.com/ e deve ser adicionada somente ao `.env.local` como `GEOAPIFY_API_KEY`. Instagram e Lista manual podem ser habilitados junto com Geoapify.
@@ -145,6 +144,6 @@ O modo de teste vem ativo por padrao em Configuracoes. Nesse modo:
 Pesquisa: sim
 Analise: sim
 Fila: sim
-Mensagem IA: sim
+Mensagem: escrita pelo usuario (ou modelo fixo, sem IA)
 Envio real: nao
 ```

@@ -13,7 +13,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { analyzeLeadActionAuthorized as analyzeLeadAction, generateMessageActionAuthorized as generateMessageAction } from '@/app/actions/ai';
+import { analyzeLeadActionAuthorized as analyzeLeadAction } from '@/app/actions/ai';
+import { buildApproachTemplate } from '@/lib/approach-template';
 import { markMessageSent, doNotContactLead, clearAllLeadsAction } from '@/app/actions';
 import { cancelPreparedDmAction, confirmPreparedDmAction, previewInstagramProfileAction, sendFirstDmAction } from '@/app/settings/actions-automation';
 import { buildWhatsAppUrl } from '@/lib/phone';
@@ -65,10 +66,8 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setLeads(initialLeads);
   }
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [message, setMessage] = useState('');
-  const [strategy, setStrategy] = useState('Consultiva');
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showDoNotContactDialog, setShowDoNotContactDialog] = useState(false);
@@ -131,19 +130,11 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     setIsAnalyzing(false);
   };
 
-  const handleGenerateMessage = async () => {
+  // Modelo fixo (sem IA): preenche o campo pra o usuario revisar/editar.
+  const handleUseTemplate = () => {
     if (leads.length === 0 || currentIndex >= leads.length) return;
-    const currentLead = leads[currentIndex];
-    if (isGenerating) return;
     clearError();
-    setIsGenerating(true);
-    const res = await generateMessageAction(currentLead.id, strategy);
-    if (res.success && res.message) {
-      setMessage(res.message);
-    } else {
-      setError(res.error ?? 'Não foi possível gerar a mensagem. Verifique se a Gemini API está configurada.');
-    }
-    setIsGenerating(false);
+    setMessage(buildApproachTemplate(leads[currentIndex]));
   };
 
   const handleCopy = useCallback(() => {
@@ -429,32 +420,20 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
           <div className="space-y-3 border-t border-neutral-200 dark:border-neutral-800 pt-6">
             <div className="flex flex-wrap justify-between items-center gap-2">
               <h3 className="font-semibold text-base text-neutral-900 dark:text-neutral-50">Mensagem de Abordagem</h3>
-              <div className="flex items-center gap-2">
-                <select
-                  value={strategy}
-                  onChange={(e) => setStrategy(e.target.value)}
-                  className="text-sm text-neutral-900 dark:text-neutral-50 border border-neutral-300 dark:border-neutral-700 rounded-md px-2 py-1.5 bg-white dark:bg-neutral-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="Consultiva">Consultiva</option>
-                  <option value="Local">Local (Maceió)</option>
-                  <option value="Problema">Focada em Problema</option>
-                  <option value="Direta">Direta</option>
-                </select>
-                <Button onClick={handleGenerateMessage} disabled={isGenerating} size="sm" variant="secondary">
-                  <MessageSquareText className="w-4 h-4 mr-2" />
-                  {isGenerating ? 'Gerando...' : 'Criar/Regenerar'}
-                </Button>
-              </div>
+              <Button onClick={handleUseTemplate} size="sm" variant="secondary">
+                <MessageSquareText className="w-4 h-4 mr-2" />
+                Usar modelo
+              </Button>
             </div>
 
             <Textarea
               value={message}
               onChange={(e) => setMessage(e.target.value)}
-              placeholder="Gere uma mensagem com IA ou escreva aqui. Você pode editar antes de enviar."
+              placeholder="Escreva a mensagem aqui. Você pode editar antes de enviar."
               className="min-h-[130px] text-base text-neutral-900 dark:text-neutral-50 border-neutral-300 placeholder:text-neutral-500 resize-none"
             />
             <p className="text-xs text-neutral-600 dark:text-neutral-400">
-              💡 Clique em &quot;Criar/Regenerar&quot; pra gerar uma mensagem com IA, ou digite a sua própria aqui.
+              💡 Escreva a sua mensagem ou clique em &quot;Usar modelo&quot; para começar de um texto pronto e ajustar.
             </p>
           </div>
         </CardContent>

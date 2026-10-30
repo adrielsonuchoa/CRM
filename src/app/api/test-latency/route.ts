@@ -1,5 +1,4 @@
-import { getOpenAIClient, getAiModel, isAiConfigured } from '@/lib/ai-client';
-import { getReasoningEffort, isReasoningModel } from '@/lib/approach-message';
+import { getOpenAIClient, getAiModel, getReasoningEffort, isAiConfigured, isReasoningModel } from '@/lib/ai-client';
 import { getRuntimeEnv } from '@/lib/runtime-env';
 import { getCurrentUser } from '@/lib/auth-helpers';
 

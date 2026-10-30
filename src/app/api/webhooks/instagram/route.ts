@@ -1,23 +1,9 @@
-import type OpenAI from 'openai';
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { db } from '@/db';
-import { activities, leads, settings, webhookEvents } from '@/db/schema';
+import { activities, leads, webhookEvents } from '@/db/schema';
 import { eq } from 'drizzle-orm';
-import { sendInstagramMessageViaApi } from '@/lib/meta-api';
 import { cancelPendingFollowUps } from '@/lib/follow-ups';
-import { getOpenAIClient, getAiModel, isAiConfigured } from '@/lib/ai-client';
-import { getReasoningEffort, isReasoningModel } from '@/lib/approach-message';
-
-// Este arquivo usava sua PRÓPRIA cópia da configuração da IA (apontando
-// direto para o Gemini com GEMINI_API_KEY), separada da usada em ai.ts. Isso
-// fez com que, ao migrar para o OpenRouter, a resposta automática sugerida
-// aqui continuasse quebrada mesmo depois da troca — corrigido usando o
-// mesmo cliente compartilhado (@/lib/ai-client).
-function getOpenAI() {
-  if (!isAiConfigured()) return null;
-  return getOpenAIClient();
-}
 
 function safeEqual(a: string, b: string) {
   const left = Buffer.from(a);
@@ -145,72 +131,7 @@ async function handleInboundMessage(senderId: string, senderUsername: string | u
   console.log('[META] Mensagem recebida');
   await cancelPendingFollowUps(leadId, 'Cancelado: lead respondeu.');
 
-  let suggestedReply = '';
-  const openai = getOpenAI();
-  if (openai) {
-    try {
-      const replyModel = getAiModel();
-      const replyParams: Record<string, unknown> = {
-        model: replyModel,
-        messages: [
-          {
-            role: 'system',
-            content: 'Voce escreve respostas comerciais curtas para a Sirrus. Use apenas a mensagem recebida e dados do lead; nao invente informacoes.',
-          },
-          {
-            role: 'user',
-            content: `Lead: ${existingLead.businessName}\nMensagem recebida: ${messageText}\nGere uma resposta sugerida curta, cordial e revisavel pelo usuario antes do envio.`,
-          },
-        ],
-      };
-      // Mesmo cuidado do ai.ts: modelos "reasoning" gastam parte do
-      // orcamento de tokens de saida pensando internamente antes de
-      // escrever a resposta. Sem isso, a resposta sugerida pode sair
-      // cortada no meio da frase.
-      const replyReasoningEffort = getReasoningEffort(replyModel);
-      if (replyReasoningEffort) replyParams.reasoning_effort = replyReasoningEffort;
-      if (isReasoningModel(replyModel)) {
-        replyParams.max_completion_tokens = 512;
-      } else {
-        replyParams.max_tokens = 200;
-      }
-      const aiRes = await openai.chat.completions.create(replyParams as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
-      suggestedReply = aiRes.choices[0]?.message?.content || '';
-    } catch (err: any) {
-      console.error('[ERROR] Erro ao gerar resposta sugerida:', err?.message ?? err);
-    }
-  }
-
-  if (suggestedReply) {
-    await db.insert(activities).values({
-      id: crypto.randomUUID(),
-      leadId,
-      type: 'MESSAGE_GENERATED',
-      channel: 'INSTAGRAM',
-      direction: 'OUTBOUND',
-      content: suggestedReply,
-      metadata: JSON.stringify({ provider: 'META_API', suggestedReply: true, autoSent: false, eventId }),
-      createdAt: new Date(),
-    });
-  }
-
-  const config = (await db.select().from(settings).limit(1))[0];
-  const autoReply = (config?.autoReplyEnabled ?? false) && process.env.AUTO_REPLY === 'true';
-  if (autoReply && !existingLead.doNotContact && senderId && suggestedReply) {
-    const sendRes = await sendInstagramMessageViaApi(senderId, suggestedReply);
-    if (sendRes.success) {
-      await db.insert(activities).values({
-        id: crypto.randomUUID(),
-        leadId,
-        type: 'MESSAGE_SENT',
-        channel: 'INSTAGRAM',
-        direction: 'OUTBOUND',
-        content: suggestedReply,
-        metadata: JSON.stringify({ provider: 'META_API', autoReply: true, eventId }),
-        createdAt: new Date(),
-      });
-    }
-  }
-
+  // Sem resposta automatica nem sugestao por IA: a IA do CRM e usada so na
+  // busca/qualificacao de leads. A resposta e escrita pelo usuario.
   await rememberWebhookEvent(eventId, payloadHash, leadId);
 }
