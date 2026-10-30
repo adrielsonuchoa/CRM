@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getMetaApiStatusConfig } from '@/lib/meta-api';
 import { getWorkerStatus } from '@/lib/browser-worker';
 import { isRuntimeEnvSet } from '@/lib/runtime-env';
+import { isRedisCacheConfigured } from '@/lib/cache';
 
 export async function GET() {
   const meta = getMetaApiStatusConfig();
@@ -18,6 +19,7 @@ export async function GET() {
     app: true,
     aiConfigured: isRuntimeEnvSet('OPENROUTER_API_KEY'),
     metaConfigured: meta.configured,
+    cacheRedisConfigured: isRedisCacheConfigured(),
     workerAvailable,
   });
 }

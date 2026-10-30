@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { db } from '@/db';
 import { activities, leads } from '@/db/schema';
+import { CACHE_TTL, cached } from '@/lib/cache';
 
 type ProspectingSettings = {
   city: string | null;
@@ -93,11 +94,15 @@ function getInstagramUsername(value: string | null | undefined) {
 export async function findInstagramOnWebsite(website: string | null | undefined) {
   if (!website) return null;
   try {
-    const response = await fetch(website, { signal: AbortSignal.timeout(5000), headers: { 'user-agent': 'Sirrus CRM public website lookup' } });
-    if (!response.ok) return null;
-    const html = await response.text();
-    const matches = html.match(/https?:\/\/(?:www\.)?instagram\.com\/[A-Za-z0-9._%/-]+/gi) ?? [];
-    return matches.map(getInstagramUsername).find(Boolean) ?? null;
+    // Site que respondeu (com ou sem @ no HTML) fica em cache; falha de rede
+    // sobe como erro e nao e cacheada, pra tentar de novo na proxima.
+    return await cached('website-instagram', [website], async () => {
+      const response = await fetch(website, { signal: AbortSignal.timeout(5000), headers: { 'user-agent': 'Sirrus CRM public website lookup' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      const matches = html.match(/https?:\/\/(?:www\.)?instagram\.com\/[A-Za-z0-9._%/-]+/gi) ?? [];
+      return matches.map(getInstagramUsername).find(Boolean) ?? null;
+    }, { ttlSeconds: CACHE_TTL.WEEK });
   } catch {
     return null;
   }
@@ -266,14 +271,22 @@ export async function discoverGeoapifyPlaces(config: ProspectingSettings): Promi
   let duplicates = 0;
   const duplicateIndex = await buildLeadDuplicateIndex();
 
-  const geocodeResponse = await fetch(`https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(city ?? 'Brasil')}&format=json&limit=1&apiKey=${encodeURIComponent(apiKey)}`, {
-    signal: AbortSignal.timeout(20000),
-  }).catch((error) => ({ ok: false, status: 0, json: async () => ({ results: [], error: { message: error?.message ?? 'Falha de rede' } }) }));
-  const geocodeData = await geocodeResponse.json() as { results?: Array<{ lat?: number; lon?: number }>; error?: { message?: string } };
-  const coordinates = geocodeData.results?.[0];
-  if (!geocodeResponse.ok || typeof coordinates?.lat !== 'number' || typeof coordinates.lon !== 'number') {
-    return { leadIds, found, created: leadIds.length, duplicates, errors: [`Geoapify geocoding: ${geocodeData.error?.message ?? 'cidade não localizada.'}`] };
+  // Coordenadas de uma cidade nao mudam: so pede ao Geoapify uma vez por mes.
+  const geocode = await cached('geoapify-geocode', [city ?? 'Brasil'], async () => {
+    const geocodeResponse = await fetch(`https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(city ?? 'Brasil')}&format=json&limit=1&apiKey=${encodeURIComponent(apiKey)}`, {
+      signal: AbortSignal.timeout(20000),
+    }).catch((error) => ({ ok: false, status: 0, json: async () => ({ results: [], error: { message: error?.message ?? 'Falha de rede' } }) }));
+    const geocodeData = await geocodeResponse.json() as { results?: Array<{ lat?: number; lon?: number }>; error?: { message?: string } };
+    const first = geocodeData.results?.[0];
+    if (!geocodeResponse.ok || typeof first?.lat !== 'number' || typeof first.lon !== 'number') {
+      return { error: geocodeData.error?.message ?? 'cidade não localizada.' };
+    }
+    return { lat: first.lat, lon: first.lon };
+  }, { ttlSeconds: CACHE_TTL.MONTH, shouldCache: (value) => !('error' in value) });
+  if ('error' in geocode) {
+    return { leadIds, found, created: leadIds.length, duplicates, errors: [`Geoapify geocoding: ${geocode.error}`] };
   }
+  const coordinates = geocode;
 
   // Antes: a condição de parada (`found >= limit`) contava TODO resultado
   // devolvido pelo Geoapify, inclusive os que já existiam no CRM
@@ -308,17 +321,24 @@ export async function discoverGeoapifyPlaces(config: ProspectingSettings): Promi
         offset: String(offset),
         apiKey,
       });
-      const response = await fetch(`https://api.geoapify.com/v2/places?${params.toString()}`, {
-        signal: AbortSignal.timeout(20000),
-      }).catch((error) => ({ ok: false, status: 0, json: async () => ({ features: [], error: { message: error?.message ?? 'Falha de rede' } }) }));
+      // Mesma pagina (categoria + coordenadas + offset) nao e pedida de novo
+      // por 3 dias - a deduplicacao contra o banco continua rodando em cima.
+      // A chave nao inclui a apiKey.
+      const pageResult = await cached('geoapify-places', [category, coordinates.lon, coordinates.lat, GEOAPIFY_PAGE_SIZE, offset], async () => {
+        const response = await fetch(`https://api.geoapify.com/v2/places?${params.toString()}`, {
+          signal: AbortSignal.timeout(20000),
+        }).catch((error) => ({ ok: false, status: 0, json: async () => ({ features: [], error: { message: error?.message ?? 'Falha de rede' } }) }));
 
-      const data = await response.json() as { features?: Array<{ properties?: GeoapifyPlace }>; error?: { message?: string } };
-      if (!response.ok) {
-        errors.push(`Geoapify (${term}): ${data.error?.message ?? `HTTP ${response.status}`}`);
+        const data = await response.json() as { features?: Array<{ properties?: GeoapifyPlace }>; error?: { message?: string } };
+        if (!response.ok) return { error: data.error?.message ?? `HTTP ${response.status}` };
+        return { features: data.features ?? [] };
+      }, { ttlSeconds: 3 * CACHE_TTL.DAY, shouldCache: (value) => !('error' in value) });
+      if ('error' in pageResult) {
+        errors.push(`Geoapify (${term}): ${pageResult.error}`);
         break;
       }
 
-      const features = data.features ?? [];
+      const features = pageResult.features;
       if (features.length === 0) break; // sem mais resultados para este termo
 
       for (const feature of features) {

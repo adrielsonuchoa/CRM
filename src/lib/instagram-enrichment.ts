@@ -4,6 +4,7 @@ import { activities, leads } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import crypto from 'crypto';
 import { findInstagramOnWebsite } from '@/lib/prospecting-sources';
+import { CACHE_TTL, cached } from '@/lib/cache';
 import { disambiguateInstagramCandidates, suggestInstagramUsernamesWithAI } from '@/app/actions/ai';
 
 
@@ -214,9 +215,13 @@ export async function fetchInstagramProfileViaApi(page: Page, username: string):
 }
 
 export async function scrapeInstagramProfile(page: Page, username: string): Promise<InstagramProfileData | null> {
-  const viaApi = await fetchInstagramProfileViaApi(page, username);
-  if (viaApi !== undefined) return viaApi;
-  return scrapeInstagramProfileFromPage(page, username);
+  // So perfis encontrados ficam em cache (1 dia): null pode ser bloqueio
+  // temporario do Instagram, e cachear isso esconderia um perfil real.
+  return cached('instagram-profile', [username.replace(/^@/, '')], async () => {
+    const viaApi = await fetchInstagramProfileViaApi(page, username);
+    if (viaApi !== undefined) return viaApi;
+    return scrapeInstagramProfileFromPage(page, username);
+  }, { ttlSeconds: CACHE_TTL.DAY, shouldCache: (profile) => profile !== null });
 }
 
 async function scrapeInstagramProfileFromPage(page: Page, username: string): Promise<InstagramProfileData | null> {
@@ -425,11 +430,14 @@ function extractInstagramHandlesFromResults(page: Page) {
 }
 
 async function searchWithProvider(page: Page, provider: SearchProvider, query: string): Promise<string[]> {
-  const url = provider === 'bing'
-    ? `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=pt-br&cc=BR`
-    : `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
-  return extractInstagramHandlesFromResults(page);
+  // Lista vazia nao e cacheada: pode ser captcha/bloqueio do buscador.
+  return cached(`search-${provider}`, [query], async () => {
+    const url = provider === 'bing'
+      ? `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=pt-br&cc=BR`
+      : `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    return extractInstagramHandlesFromResults(page);
+  }, { ttlSeconds: CACHE_TTL.WEEK, shouldCache: (handles) => handles.length > 0 });
 }
 
 function isConnectionError(err: any) {
