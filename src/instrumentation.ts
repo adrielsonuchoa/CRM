@@ -43,8 +43,11 @@ export async function register() {
   // standalone) nunca precise de um passo manual de "npm run db:migrate".
   const { db } = await import('@/db');
   const { migrate } = await import('drizzle-orm/libsql/migrator');
+  const { ensureLegacyColumns } = await import('@/db/ensure-columns');
   try {
     await migrate(db, { migrationsFolder: './drizzle' });
+    const added = await ensureLegacyColumns(db.$client);
+    if (added.length > 0) console.log(`[instrumentation] Colunas adicionadas: ${added.join(', ')}`);
     console.log('[instrumentation] Migracoes do banco aplicadas.');
   } catch (err) {
     console.error('[instrumentation] Falha ao aplicar migracoes do banco:', err);

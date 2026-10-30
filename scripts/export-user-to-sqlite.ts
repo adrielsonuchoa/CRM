@@ -14,6 +14,7 @@ import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { eq } from 'drizzle-orm';
 import { users, userPermissions } from '../src/db/schema';
+import { ensureLegacyColumns } from '../src/db/ensure-columns';
 
 const sourceUrl = process.env.SOURCE_DATABASE_URL?.trim();
 const sourceToken = process.env.SOURCE_TURSO_AUTH_TOKEN?.trim();
@@ -43,6 +44,7 @@ async function main() {
   const targetClient = createClient({ url: targetPath! });
   const targetDb = drizzle(targetClient);
   await migrate(targetDb, { migrationsFolder: './drizzle' });
+  await ensureLegacyColumns(targetClient);
   await targetDb.insert(users).values(user);
   if (permissionRows.length > 0) {
     await targetDb.insert(userPermissions).values(permissionRows);

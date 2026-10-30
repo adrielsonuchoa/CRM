@@ -1,6 +1,7 @@
 import { createClient } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
+import { ensureLegacyColumns } from './ensure-columns';
 
 // Antes fixo em 'file:sqlite.db' — passou a respeitar TURSO_DATABASE_URL,
 // igual ao runtime (src/db/index.ts) e ao drizzle.config.ts, pra migração e
@@ -13,6 +14,8 @@ const db = drizzle(client);
 async function runMigrate() {
   console.log('Running migrations...');
   await migrate(db, { migrationsFolder: './drizzle' });
+  const added = await ensureLegacyColumns(client);
+  if (added.length > 0) console.log(`Colunas adicionadas: ${added.join(', ')}`);
   console.log('Migrations complete!');
   client.close();
 }
