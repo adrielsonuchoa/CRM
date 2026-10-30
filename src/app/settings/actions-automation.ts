@@ -9,6 +9,7 @@ import {
   confirmPreparedDmViaBrowser,
   cancelPreparedDmViaBrowser,
   previewInstagramProfileViaBrowser,
+  warmupQueueLeadsViaBrowser,
   enrichLeadViaBrowser,
   testWorkerReadiness,
   getRecentWorkerActivities,
@@ -20,6 +21,10 @@ import { revalidatePath } from 'next/cache';
 import { requirePermission, requireUser, AuthError, ForbiddenError, type CurrentUser } from '@/lib/auth-helpers';
 import type { PermissionKey } from '@/lib/permissions';
 import { logAudit } from '@/lib/audit-log';
+import { db } from '@/db';
+import { leads } from '@/db/schema';
+import { and, inArray } from 'drizzle-orm';
+import { leadVisibilityCondition } from '@/lib/lead-access';
 
 function authErrorMessage(error: unknown): string | null {
   if (error instanceof AuthError || error instanceof ForbiddenError) return error.message;
@@ -248,4 +253,26 @@ export async function fetchMetaStatusConfigAction() {
   if (denied) return denied;
   const config = getMetaApiStatusConfig();
   return { success: true, config };
+}
+
+// Pre-carrega o Instagram dos leads da Fila de Prospeccao em segundo plano
+// (acha o @ de quem ainda nao tem e guarda a screenshot do perfil). Volta na
+// hora - quem faz o trabalho e o processo que tem o navegador.
+export async function warmupQueueAction(leadIds: string[]) {
+  const { denied } = await gate('INSTAGRAM_PREVIEW_PROFILE');
+  if (denied) return denied;
+  return warmupQueueLeadsViaBrowser(leadIds.slice(0, 100));
+}
+
+// A Fila consulta isso de tempos em tempos pra mostrar os @ que o
+// pre-carregamento for achando, sem recarregar a pagina.
+export async function getQueueInstagramAction(leadIds: string[]) {
+  const { user, denied } = await gate('LEAD_VIEW');
+  if (denied) return { ...denied, leads: [] };
+  if (leadIds.length === 0) return { success: true, leads: [] };
+  const rows = await db
+    .select({ id: leads.id, instagramUsername: leads.instagramUsername, followers: leads.followers })
+    .from(leads)
+    .where(and(inArray(leads.id, leadIds.slice(0, 100)), leadVisibilityCondition(user)));
+  return { success: true, leads: rows };
 }

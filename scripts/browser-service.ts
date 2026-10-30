@@ -23,6 +23,7 @@ import {
   checkChromeConnection,
   enrichLeadViaBrowser,
   previewInstagramProfileViaBrowser,
+  warmupQueueLeadsViaBrowser,
   sendFirstDmViaBrowser,
   confirmPreparedDmViaBrowser,
   cancelPreparedDmViaBrowser,
@@ -52,6 +53,7 @@ const routes: Record<string, Handler> = {
   '/send-first-dm': (body) => sendFirstDmViaBrowser(body?.leadId, body?.requestedMessage),
   '/confirm-dm': (body) => confirmPreparedDmViaBrowser(body?.leadId, body?.requestedMessage),
   '/cancel-dm': (body) => cancelPreparedDmViaBrowser(body?.leadId),
+  '/warmup-queue': (body) => warmupQueueLeadsViaBrowser(Array.isArray(body?.leadIds) ? body.leadIds.map(String) : []),
   '/worker/start': () => startWorker(),
   '/worker/pause': () => pauseWorker(),
 };

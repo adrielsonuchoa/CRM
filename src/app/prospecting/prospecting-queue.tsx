@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -16,7 +16,7 @@ import {
 import { analyzeLeadActionAuthorized as analyzeLeadAction } from '@/app/actions/ai';
 import { buildApproachTemplate } from '@/lib/approach-template';
 import { markMessageSent, doNotContactLead, clearAllLeadsAction } from '@/app/actions';
-import { cancelPreparedDmAction, confirmPreparedDmAction, previewInstagramProfileAction, sendFirstDmAction } from '@/app/settings/actions-automation';
+import { cancelPreparedDmAction, confirmPreparedDmAction, getQueueInstagramAction, previewInstagramProfileAction, sendFirstDmAction, warmupQueueAction } from '@/app/settings/actions-automation';
 import { buildWhatsAppUrl } from '@/lib/phone';
 import {
   AtSign, BrainCircuit, MessageSquareText, CheckCircle, Send,
@@ -79,6 +79,44 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
   const [instagramScreenshot, setInstagramScreenshot] = useState<string | null>(null);
 
   const clearError = () => setError(null);
+
+  // Pre-carrega o Instagram de toda a fila em segundo plano assim que ela
+  // abre (ou recebe leads novos), a partir do lead atual: acha o @ de quem
+  // ainda nao tem e deixa a foto do perfil em cache, pra "Preparar DM" ficar
+  // instantaneo. O servidor ignora leads ja enfileirados.
+  const queueIdsKey = leads.map((lead) => lead.id).join(',');
+  useEffect(() => {
+    const ids = queueIdsKey ? queueIdsKey.split(',') : [];
+    const ordered = [...ids.slice(currentIndex), ...ids.slice(0, currentIndex)];
+    if (ordered.length > 0) void warmupQueueAction(ordered).catch(() => undefined);
+    // currentIndex fica de fora de proposito: so a ordem inicial importa.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queueIdsKey]);
+
+  // Mostra os @ que o pre-carregamento for achando, sem recarregar a pagina.
+  const missingInstagramKey = leads.filter((lead) => !lead.instagramUsername).map((lead) => lead.id).join(',');
+  useEffect(() => {
+    if (!missingInstagramKey) return;
+    const timer = setInterval(async () => {
+      const res = await getQueueInstagramAction(missingInstagramKey.split(',')).catch(() => null);
+      const found = new Map((res?.leads ?? []).filter((row) => row.instagramUsername).map((row) => [row.id, row]));
+      if (found.size === 0) return;
+      setLeads((current) => current.map((lead) => {
+        const row = found.get(lead.id);
+        return row && !lead.instagramUsername
+          ? { ...lead, instagramUsername: row.instagramUsername, followers: row.followers ?? lead.followers }
+          : lead;
+      }));
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [missingInstagramKey]);
+
+  function applyFoundInstagram(leadId: string, instagramUsername: string | undefined) {
+    if (!instagramUsername) return;
+    setLeads((current) => current.map((lead) => (lead.id === leadId && lead.instagramUsername !== instagramUsername
+      ? { ...lead, instagramUsername }
+      : lead)));
+  }
 
   const resetDmPanel = () => {
     setShowInstagramPanel(false);
@@ -201,11 +239,15 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     const res = await sendFirstDmAction(currentLead.id, message.trim() || undefined);
     resultadoRealChegou = true;
     setIsAutoSending(false);
-    if (res.success && res.prepared) {
+    // O @ pode ter sido achado agora mesmo se a conversa nao abriu: atualiza
+    // o card pra liberar "Visualizar perfil" e "Preparar DM".
+    applyFoundInstagram(currentLead.id, 'instagramUsername' in res ? res.instagramUsername : undefined);
+    if (res.success && 'prepared' in res && res.prepared) {
       if (res.message) setMessage(res.message);
       setInstagramScreenshot(res.screenshot ?? null);
       setDmStatus('PREPARED');
     } else {
+      if ('screenshot' in res && res.screenshot) setInstagramScreenshot(res.screenshot);
       setDmStatus('ERROR');
       setError(res.error || 'Falha ao enviar DM via automação.');
     }
@@ -554,7 +596,7 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
               <span className={`h-2.5 w-2.5 rounded-full ${dmStatus === 'ERROR' ? 'bg-red-500' : dmStatus === 'PREPARED' ? 'bg-amber-500' : dmStatus === 'SENT' ? 'bg-green-500' : dmStatus === 'CONNECTING' ? 'animate-pulse bg-blue-500' : 'bg-neutral-300'}`} />
               {dmStatus === 'CONNECTING' && 'Carregando o Instagram em segundo plano...'}
               {dmStatus === 'VIEWING' && 'Perfil do Instagram carregado'}
-              {dmStatus === 'PREPARED' && (message.trim() ? 'Mensagem digitada — aguardando sua confirmação' : 'Conversa aberta — crie a mensagem com IA ou digite a sua')}
+              {dmStatus === 'PREPARED' && (message.trim() ? 'Mensagem digitada — aguardando sua confirmação' : 'Conversa aberta — digite a mensagem ou use o modelo')}
               {dmStatus === 'SENT' && 'Mensagem enviada e registrada no CRM'}
               {dmStatus === 'ERROR' && 'Não foi possível preparar a conversa'}
               {dmStatus === 'IDLE' && 'Clique em “Preparar DM” para abrir a conversa'}

@@ -11,6 +11,7 @@ import { enrichLeadWithInstagram, searchInstagramUsernames } from '@/lib/instagr
 import { isAiConfigured } from '@/lib/ai-client';
 import { hasVerifiableContact, NO_CONTACT_STAGE, PRE_CONTACT_STAGES } from '@/lib/lead-contact';
 import { scheduleFollowUpAfterContact } from '@/lib/follow-ups';
+import { getCachedValue, setCachedValue } from '@/lib/cache';
 
 // O pacote 'playwright' so pode ser carregado sob demanda: um import
 // estatico no topo do arquivo quebra qualquer rota da Vercel que importe
@@ -1524,6 +1525,9 @@ export type DmPreparationResult = {
   prepared?: boolean;
   message?: string;
   screenshot?: string;
+  // Instagram confirmado durante a preparacao (inclusive quando ela falha
+  // depois) - a Fila usa pra atualizar o card sem recarregar a pagina.
+  instagramUsername?: string;
 };
 
 // "Visualizar perfil" abria um Chromium de fundo inteiro (processo novo +
@@ -1533,37 +1537,107 @@ export type DmPreparationResult = {
 // curto: perfil do Instagram nao muda a cada poucos minutos, entao reusar a
 // ultima screenshot evita reabrir o navegador sem exibir nada desatualizado
 // na pratica.
+//
+// Duas camadas: memoria (instantaneo, so este processo) e Redis (6h,
+// compartilhado entre o servidor do CRM, o worker e o browser-service - a
+// busca pode pre-aquecer num processo e a Fila ler em outro).
 const instagramPreviewCache = new Map<string, { screenshot: string; expiresAt: number }>();
 const PREVIEW_CACHE_TTL_MS = 10 * 60 * 1000;
 const PREVIEW_CACHE_MAX_SIZE = 50;
+const PREVIEW_REDIS_TTL_SECONDS = 6 * 60 * 60;
 
-function getCachedPreview(username: string) {
+async function getCachedPreview(username: string) {
   const entry = instagramPreviewCache.get(username);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    instagramPreviewCache.delete(username);
-    return null;
-  }
-  return entry.screenshot;
+  if (entry && Date.now() <= entry.expiresAt) return entry.screenshot;
+  if (entry) instagramPreviewCache.delete(username);
+  const shared = await getCachedValue<string>('instagram-preview', [username]);
+  if (shared) rememberPreviewInMemory(username, shared);
+  return shared;
 }
 
-// Fila serial de pre-aquecimento de preview: nunca mais de uma navegacao de
-// preview ao mesmo tempo, pra nao competir com o enriquecimento da busca.
-let previewWarmupChain: Promise<unknown> = Promise.resolve();
-function queuePreviewWarmup(leadId: string) {
-  previewWarmupChain = previewWarmupChain
-    .then(() => previewInstagramProfileViaBrowser(leadId))
-    .catch((err) => {
-      console.warn('[TARGETED] Falha ao pre-aquecer preview do Instagram:', leadId, err?.message);
-    });
-}
-
-function setCachedPreview(username: string, screenshot: string) {
+function rememberPreviewInMemory(username: string, screenshot: string) {
   if (!instagramPreviewCache.has(username) && instagramPreviewCache.size >= PREVIEW_CACHE_MAX_SIZE) {
     const oldestKey = instagramPreviewCache.keys().next().value;
     if (oldestKey) instagramPreviewCache.delete(oldestKey);
   }
   instagramPreviewCache.set(username, { screenshot, expiresAt: Date.now() + PREVIEW_CACHE_TTL_MS });
+}
+
+async function setCachedPreview(username: string, screenshot: string) {
+  rememberPreviewInMemory(username, screenshot);
+  await setCachedValue('instagram-preview', [username], screenshot, PREVIEW_REDIS_TTL_SECONDS);
+}
+
+// Fila serial de pre-aquecimento: nunca mais de uma navegacao ao mesmo
+// tempo, pra nao competir com o enriquecimento da busca. leadIds ja
+// enfileirados nao entram de novo (a Fila pede o pre-aquecimento a cada
+// vez que abre / muda de lead).
+let previewWarmupChain: Promise<unknown> = Promise.resolve();
+const warmupQueued = new Set<string>();
+// Sem limite, um Chrome fechado/sem resposta deixava a conexao pendurada e
+// travava a fila inteira (inclusive as fotos de perfil da busca).
+const WARMUP_TASK_TIMEOUT_MS = 90_000;
+
+function enqueueWarmup(leadId: string, task: () => Promise<unknown>) {
+  if (warmupQueued.has(leadId)) return false;
+  warmupQueued.add(leadId);
+  previewWarmupChain = previewWarmupChain
+    .then(() => {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`tempo esgotado (${WARMUP_TASK_TIMEOUT_MS / 1000}s)`)), WARMUP_TASK_TIMEOUT_MS);
+      });
+      return Promise.race([task(), timeout]).finally(() => clearTimeout(timer));
+    })
+    .catch((err) => console.warn('[WARMUP] Falha ao pre-carregar Instagram:', leadId, err?.message))
+    .finally(() => warmupQueued.delete(leadId));
+  return true;
+}
+
+function queuePreviewWarmup(leadId: string) {
+  enqueueWarmup(leadId, () => previewInstagramProfileViaBrowser(leadId));
+}
+
+// Pre-carrega o Instagram dos leads da Fila em segundo plano, na ordem
+// recebida (a Fila manda o lead atual primeiro): quem ainda nao tem
+// Instagram e nunca foi buscado e enriquecido (acha o @), e quem tem ganha a
+// screenshot do perfil em cache - "Preparar DM"/"Visualizar" ficam
+// instantaneos. Retorna na hora; o trabalho segue sozinho.
+export async function warmupQueueLeadsViaBrowser(leadIds: string[]): Promise<{ success: boolean; queued: number; error?: string }> {
+  if (isBrowserServiceConfigured()) {
+    try {
+      return await proxyToBrowserService<{ success: boolean; queued: number }>('/warmup-queue', { leadIds });
+    } catch (err: any) {
+      return { success: false, queued: 0, error: `Servico de navegador de Instagram indisponivel: ${err?.message ?? err}` };
+    }
+  }
+
+  let queued = 0;
+  for (const leadId of leadIds.slice(0, 100)) {
+    const added = enqueueWarmup(leadId, async () => {
+      const lead = (await db.select({
+        instagramUsername: leads.instagramUsername,
+        enrichmentStatus: leads.enrichmentStatus,
+        doNotContact: leads.doNotContact,
+      }).from(leads).where(eq(leads.id, leadId)).limit(1))[0];
+      if (!lead || lead.doNotContact) return;
+
+      let username = sanitizeInstagramUsername(lead.instagramUsername);
+      // Busca so quem nunca foi buscado, e nunca durante uma busca
+      // direcionada (que ja esta usando o navegador pra isso).
+      const neverSearched = !lead.enrichmentStatus || lead.enrichmentStatus === 'PENDING';
+      if (!username && neverSearched && !targetedRunActive) {
+        const enriched = await enrichLeadViaBrowser(leadId);
+        username = enriched.success ? sanitizeInstagramUsername(enriched.username) : null;
+      }
+      if (username && !(await getCachedPreview(username))) {
+        await previewInstagramProfileViaBrowser(leadId);
+      }
+    });
+    if (added) queued++;
+  }
+  if (queued > 0) console.log(`[WARMUP] ${queued} lead(s) da Fila enfileirados para pre-carregar o Instagram.`);
+  return { success: true, queued };
 }
 
 export async function previewInstagramProfileViaBrowser(leadId: string, opts: { forceRefresh?: boolean } = {}): Promise<{ success: boolean; error?: string; screenshot?: string; cached?: boolean }> {
@@ -1580,7 +1654,7 @@ export async function previewInstagramProfileViaBrowser(leadId: string, opts: { 
   if (!username) return { success: false, error: 'Este lead não possui Instagram confirmado ou o valor está inválido.' };
 
   if (!opts.forceRefresh) {
-    const cached = getCachedPreview(username);
+    const cached = await getCachedPreview(username);
     if (cached) return { success: true, screenshot: cached, cached: true };
   }
 
@@ -1594,7 +1668,7 @@ export async function previewInstagramProfileViaBrowser(leadId: string, opts: { 
     if (await hasInstagramGuardPage(background.page, bodyText)) return { success: false, error: 'O Instagram solicitou login ou verificação da sessão.' };
     const screenshot = await background.page.screenshot({ type: 'jpeg', quality: 50, fullPage: false });
     const dataUrl = `data:image/jpeg;base64,${screenshot.toString('base64')}`;
-    setCachedPreview(username, dataUrl);
+    await setCachedPreview(username, dataUrl);
     return { success: true, screenshot: dataUrl };
   } catch (err: any) {
     return { success: false, error: `Não foi possível visualizar o perfil: ${err?.message ?? 'falha desconhecida'}` };
@@ -1605,7 +1679,19 @@ export async function previewInstagramProfileViaBrowser(leadId: string, opts: { 
 
 const DM_CHAT_INPUT_SELECTOR = 'div[contenteditable="true"], p[contenteditable="true"], textarea, [role="textbox"]';
 
+// "Buscar Instagram e preparar" pode achar o @ e ainda assim falhar ao abrir a
+// conversa - antes a Fila nunca ficava sabendo do @ achado (card continuava
+// "Sem Instagram", sem "Visualizar perfil"). Todo retorno leva o @ atual do
+// lead, sucesso ou erro.
 export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: string): Promise<DmPreparationResult> {
+  const result = await prepareFirstDm(leadId, requestedMessage);
+  if (result.instagramUsername) return result;
+  const lead = (await db.select({ instagramUsername: leads.instagramUsername }).from(leads).where(eq(leads.id, leadId)).limit(1).catch(() => []))[0];
+  const instagramUsername = sanitizeInstagramUsername(lead?.instagramUsername) ?? undefined;
+  return instagramUsername ? { ...result, instagramUsername } : result;
+}
+
+async function prepareFirstDm(leadId: string, requestedMessage?: string): Promise<DmPreparationResult> {
   if (isBrowserServiceConfigured()) {
     try {
       return await proxyToBrowserService<DmPreparationResult>('/send-first-dm', { leadId, requestedMessage });
@@ -1788,10 +1874,26 @@ export async function sendFirstDmViaBrowser(leadId: string, requestedMessage?: s
     }
 
     if (!clicked) {
-      await closeBackgroundSession(context);
-      const error = `Botao de mensagem nao encontrado para @${cleanUsername}.`;
-      await setWorkerState({ status: 'ERRO', activity: error, lastError: error });
-      return { success: false, error };
+      // O Instagram nem sempre mostra "Mensagem" no perfil (fica no menu
+      // "..." ou some pra quem nao segue). Guarda a foto do perfil e tenta o
+      // link direto da conversa (ig.me/m/<usuario>), que nao depende do botao.
+      const profileShot = await page.screenshot({ type: 'jpeg', quality: 50, fullPage: false })
+        .then((buffer) => `data:image/jpeg;base64,${buffer.toString('base64')}`)
+        .catch(() => undefined);
+      if (profileShot) await setCachedPreview(cleanUsername, profileShot);
+      try {
+        await page.goto(`https://ig.me/m/${cleanUsername}`, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await page.waitForSelector(DM_CHAT_INPUT_SELECTOR, { timeout: 8000 });
+        clicked = true;
+      } catch {
+        // segue pro erro abaixo
+      }
+      if (!clicked) {
+        await closeBackgroundSession(context);
+        const error = `Não foi possível abrir a conversa com @${cleanUsername} (botão de mensagem indisponível no perfil). Use "Visualizar perfil" e envie pelo Instagram.`;
+        await setWorkerState({ status: 'ERRO', activity: error, lastError: error });
+        return { success: false, error, screenshot: profileShot };
+      }
     }
 
     if (page.isClosed()) {

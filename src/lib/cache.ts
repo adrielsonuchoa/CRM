@@ -127,6 +127,22 @@ async function writeRaw(key: string, value: string, ttlSeconds: number) {
   memoryCache.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
 }
 
+// Leitura/gravacao direta, pra quem nao cabe no formato cached() (ex.:
+// screenshot de perfil gravada por um fluxo e lida por outro).
+export async function getCachedValue<T>(namespace: string, keyParts: unknown[]): Promise<T | null> {
+  const raw = await readRaw(buildCacheKey(namespace, keyParts));
+  if (raw === null || raw === NULL_MARKER) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+export async function setCachedValue(namespace: string, keyParts: unknown[], value: unknown, ttlSeconds: number) {
+  await writeRaw(buildCacheKey(namespace, keyParts), JSON.stringify(value), ttlSeconds);
+}
+
 type CachedOptions<T> = {
   ttlSeconds: number;
   // Decide se o resultado pode ser guardado (ex.: nao cachear lista vazia
