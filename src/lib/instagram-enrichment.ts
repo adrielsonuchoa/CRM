@@ -4,6 +4,7 @@ import { activities, leads } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import crypto from 'crypto';
 import { findInstagramOnWebsite } from '@/lib/prospecting-sources';
+import { parseCount } from '@/lib/instagram-count';
 import { CACHE_TTL, cached } from '@/lib/cache';
 import { disambiguateInstagramCandidates, suggestInstagramUsernamesWithAI } from '@/app/actions/ai';
 
@@ -24,18 +25,6 @@ export type InstagramProfileData = {
 
 function normalizeName(value: string) {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-function parseCount(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const cleaned = value.trim().toLowerCase().replace(/\s+/g, ' ').replace(',', '.');
-  const match = cleaned.match(/^([\d.]+)\s*(mil|k|m)?/);
-  if (!match) return null;
-  const base = parseFloat(match[1]);
-  if (Number.isNaN(base)) return null;
-  if (match[2] === 'mil' || match[2] === 'k') return Math.round(base * 1000);
-  if (match[2] === 'm') return Math.round(base * 1000000);
-  return Math.round(base);
 }
 
 export function guessInstagramUsernames(businessName: string): string[] {

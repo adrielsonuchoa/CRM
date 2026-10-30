@@ -244,7 +244,9 @@ export function ProspectingQueue({ initialLeads }: { initialLeads: Lead[] }) {
     applyFoundInstagram(currentLead.id, 'instagramUsername' in res ? res.instagramUsername : undefined);
     if (res.success && 'prepared' in res && res.prepared) {
       if (res.message) setMessage(res.message);
-      setInstagramScreenshot(res.screenshot ?? null);
+      // Sem foto nova (ex.: modo de teste, que nao abre a conversa), mantem a
+      // foto do perfil pre-carregada em vez de apagar o painel.
+      if (res.screenshot) setInstagramScreenshot(res.screenshot);
       setDmStatus('PREPARED');
     } else {
       if ('screenshot' in res && res.screenshot) setInstagramScreenshot(res.screenshot);

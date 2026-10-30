@@ -837,10 +837,6 @@ async function hasInstagramGuardPage(page: Page, content: string) {
 // article, ou qualquer role="button"), em vez de sempre esperar o tempo
 // maximo. Nunca mais lento que o timeout antigo (mesmo teto), so mais rapido
 // no caso comum em que a pagina carrega bem antes disso.
-async function waitForInstagramContentReady(page: Page, maxMs: number) {
-  await page.waitForSelector('header, article, [role="button"], input[type="password"]', { timeout: maxMs }).catch(() => undefined);
-}
-
 async function createCandidate(username: string, term: string, city: string | null, segment: string | null, representativeUsername?: string | null) {
   const cleanUsername = sanitizeInstagramUsername(username);
   if (!cleanUsername || cleanUsername.length < 2) return null;
@@ -1663,12 +1659,21 @@ export async function previewInstagramProfileViaBrowser(leadId: string, opts: { 
     const background = await createBackgroundInstagramPage();
     backgroundContext = background.context;
     await background.page.goto(`https://www.instagram.com/${username}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await waitForInstagramContentReady(background.page, 2500);
+    // Espera o CABECALHO do perfil (foto/nome), nao um [role="button"]
+    // qualquer: o balao flutuante "Mensagens" do Instagram aparece antes do
+    // perfil e a captura saia em branco.
+    const profileReady = await background.page
+      .waitForSelector('header img, header h2, header h1, main header section', { timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+    await background.page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
     const bodyText = await background.page.locator('body').innerText().catch(() => '');
     if (await hasInstagramGuardPage(background.page, bodyText)) return { success: false, error: 'O Instagram solicitou login ou verificação da sessão.' };
     const screenshot = await background.page.screenshot({ type: 'jpeg', quality: 50, fullPage: false });
     const dataUrl = `data:image/jpeg;base64,${screenshot.toString('base64')}`;
-    await setCachedPreview(username, dataUrl);
+    // Captura sem o perfil desenhado nao vai pro cache (seria reaproveitada
+    // em branco por horas); ainda e devolvida pra quem pediu agora.
+    if (profileReady) await setCachedPreview(username, dataUrl);
     return { success: true, screenshot: dataUrl };
   } catch (err: any) {
     return { success: false, error: `Não foi possível visualizar o perfil: ${err?.message ?? 'falha desconhecida'}` };
