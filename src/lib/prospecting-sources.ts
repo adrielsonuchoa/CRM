@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { db } from '@/db';
 import { activities, leads } from '@/db/schema';
 import { CACHE_TTL, cached } from '@/lib/cache';
+import { detectCsvDelimiter, parseCsvLine } from '@/lib/csv';
 
 type ProspectingSettings = {
   city: string | null;
@@ -358,25 +359,11 @@ export async function discoverGeoapifyPlaces(config: ProspectingSettings): Promi
   return { leadIds, found, created: leadIds.length, duplicates, errors };
 }
 
-function parseCsvLine(line: string) {
-  const cells: string[] = [];
-  let cell = '';
-  let quoted = false;
-  for (let index = 0; index < line.length; index++) {
-    const char = line[index];
-    if (char === '"' && line[index + 1] === '"') { cell += '"'; index++; continue; }
-    if (char === '"') { quoted = !quoted; continue; }
-    if (char === ',' && !quoted) { cells.push(cell.trim()); cell = ''; continue; }
-    cell += char;
-  }
-  cells.push(cell.trim());
-  return cells;
-}
-
 export async function importManualLeadsCsv(csv: string): Promise<DiscoveryResult> {
   const lines = csv.replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.trim());
   if (lines.length < 2) return { leadIds: [], found: 0, created: 0, duplicates: 0, errors: ['CSV vazio ou sem linhas de dados.'] };
-  const headers = parseCsvLine(lines[0]).map((header) => normalize(header));
+  const delimiter = detectCsvDelimiter(lines[0]);
+  const headers = parseCsvLine(lines[0], delimiter).map((header) => normalize(header));
   const indexOf = (...names: string[]) => names.map(normalize).map((name) => headers.indexOf(name)).find((index) => index >= 0) ?? -1;
   const nameIndex = indexOf('nome', 'name');
   if (nameIndex < 0) return { leadIds: [], found: 0, created: 0, duplicates: 0, errors: ['CSV precisa conter a coluna nome.'] };
@@ -386,7 +373,7 @@ export async function importManualLeadsCsv(csv: string): Promise<DiscoveryResult
   let duplicates = 0;
   const duplicateIndex = await buildLeadDuplicateIndex();
   for (const [lineNumber, line] of lines.slice(1).entries()) {
-    const cells = parseCsvLine(line);
+    const cells = parseCsvLine(line, delimiter);
     const name = cells[nameIndex]?.trim();
     if (!name) { errors.push(`Linha ${lineNumber + 2}: nome ausente.`); continue; }
     const phone = cells[indexOf('telefone', 'phone')]?.trim() || null;
