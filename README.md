@@ -109,7 +109,31 @@ AUTO_REPLY=false
 
 Na tela Configuracoes, selecione Geoapify Places como fonte principal. A chave e obtida no painel do Geoapify em https://myprojects.geoapify.com/ e deve ser adicionada somente ao `.env.local` como `GEOAPIFY_API_KEY`. Instagram e Lista manual podem ser habilitados junto com Geoapify.
 
-O CSV manual aceita as colunas `nome`, `instagram`, `telefone`, `website`, `cidade` e `segmento`.
+O CSV manual aceita as colunas `nome`, `instagram`, `telefone`, `website`, `cidade` e `segmento`, separadas por `,` ou `;` (detectado automaticamente). O CSV exportado na tela Leads usa os mesmos nomes de coluna e pode ser reimportado.
+
+## Cache de pesquisas (Redis)
+
+Pesquisas repetidas (geocode e paginas do Geoapify, Instagram no site do negocio, buscas Bing/DuckDuckGo e perfis do Instagram) ficam em cache e nao sao refeitas. Configure **uma** das opcoes:
+
+```text
+REDIS_URL=redis://default:SENHA@host:porta     (Redis Cloud, Docker etc.)
+UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN  (Upstash REST)
+```
+
+Sem nenhuma, o cache fica em memoria (some ao reiniciar). Use o mesmo Redis na Vercel e na maquina do worker. Se o Redis cair, as pesquisas continuam funcionando sem cache. `/api/health` informa `cacheRedisConfigured`.
+
+## Follow-ups e tarefas
+
+Ao registrar um envio (DM, WhatsApp ou e-mail), o CRM conclui o follow-up pendente do lead e agenda o proximo, conforme Configuracoes (`dias entre follow-ups` e `maximo de follow-ups`). Se o lead responder, mudar de estagio ou for marcado como Nao Contatar, os follow-ups pendentes sao cancelados. A tela **Tarefas** lista atrasadas, de hoje e proximas; tarefas manuais podem ser criadas no detalhe do lead.
+
+## Testes e CI
+
+```bash
+npm test              # unitarios + integracao (SQLite temporario, sem chaves de API)
+npm run test:automation  # checagem do worker/Chrome/Meta no ambiente atual
+```
+
+O GitHub Actions (`.github/workflows/ci.yml`) roda lint, typecheck, testes e build a cada push na `main` e em pull requests.
 
 Nao exponha secrets no frontend. O endpoint `/api/health` retorna apenas flags booleanas nao sensiveis.
 

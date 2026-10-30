@@ -56,3 +56,7 @@ scripts/_diag/
 # admin, chaves de API, e o Node.js portatil/sqlite.db do pacote) - nunca vai pro git
 /dist/
 scripts/.node-cache/
+
+# banco local (contem leads e usuarios reais) - cada maquina cria o seu com npm run db:migrate
+/sqlite.db
+*.db-journal

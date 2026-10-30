@@ -12,7 +12,8 @@
     "db:bootstrap-admin": "tsx --env-file=.env.local src/db/bootstrap-admin.ts",
     "worker": "tsx scripts/browser-worker.ts",
     "browser-service": "tsx scripts/browser-service.ts",
-    "test": "tsx scripts/test-automation.ts",
+    "test": "node scripts/run-tests.mjs",
+    "test:automation": "tsx scripts/test-automation.ts",
     "test:messages": "tsx --env-file=.env.local scripts/test-messages.ts",
     "test:messages:real": "tsx --env-file=.env.local scripts/test-messages.ts --real",
     "typecheck": "tsc --noEmit"
