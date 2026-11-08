@@ -110,6 +110,27 @@ Na tela Configuracoes, selecione Geoapify Places como fonte principal. A chave e
 
 O CSV manual aceita as colunas `nome`, `instagram`, `telefone`, `website`, `cidade` e `segmento`, separadas por `,` ou `;` (detectado automaticamente). O CSV exportado na tela Leads usa os mesmos nomes de coluna e pode ser reimportado.
 
+## Prospeccao pelo Google Maps (Google Maps Scraper)
+
+Integra o [gosom/google-maps-scraper](https://github.com/gosom/google-maps-scraper) rodando em modo web (padrao `http://localhost:8080`, configuravel em `GOOGLE_MAPS_SCRAPER_URL`):
+
+```bash
+docker run -p 8080:8080 gosom/google-maps-scraper -web -data-folder /gmapsdata
+```
+
+A busca roda no scraper e leva alguns minutos, por isso a rota tem dois passos (exige login e a permissao de iniciar automacao):
+
+```text
+POST /api/v1/prospeccao/google-maps   {"cidade": "Maceió", "bairro": "Ponta Verde", "nicho": "pizzaria"}
+  -> 202 {"jobId": "..."}
+GET  /api/v1/prospeccao/google-maps?jobId=...
+  -> 202 enquanto roda; 200 com {criados, atualizados, ignorados} quando termina
+```
+
+Cada estabelecimento vira um lead (fonte `GOOGLE_MAPS`) com telefone, e-mail (extraido pelo scraper do site), WhatsApp (link wa.me do site ou celular), Instagram e Facebook (lidos do site, com cache). Se o lead ja existe - mesmo `place_id` do Google ou mesmo telefone, em qualquer formato - ele e atualizado: campos vazios sao completados e nota/avaliacoes renovadas, sem mexer em estagio, notas ou dados ja preenchidos. O banco tambem tem indice UNIQUE em `place_id` e `phone`.
+
+Na Vercel, `localhost:8080` nao existe: a rota so funciona onde o scraper estiver acessivel (pacote local/maquina do worker, ou um `GOOGLE_MAPS_SCRAPER_URL` publico).
+
 ## Cache de pesquisas (Redis)
 
 Pesquisas repetidas (geocode e paginas do Geoapify, Instagram no site do negocio, buscas Bing/DuckDuckGo e perfis do Instagram) ficam em cache e nao sao refeitas. Configure **uma** das opcoes:

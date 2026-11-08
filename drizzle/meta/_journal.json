@@ -71,6 +71,13 @@
       "when": 1789000000000,
       "tag": "0008_targeted_prospecting",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794000000000,
+      "tag": "0009_google_maps_scraper",
+      "breakpoints": true
     }
   ]
 }

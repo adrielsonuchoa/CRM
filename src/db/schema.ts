@@ -5,6 +5,7 @@ export const leads = sqliteTable('leads', {
   businessName: text('business_name').notNull(),
   instagramUsername: text('instagram_username'),
   instagramUrl: text('instagram_url'),
+  facebookUrl: text('facebook_url'),
   googlePlaceId: text('google_place_id'),
   placeId: text('place_id'),
   googleMapsUrl: text('google_maps_url'),

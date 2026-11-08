@@ -50,3 +50,45 @@ export function parseCsvLine(line: string, delimiter: CsvDelimiter = ','): strin
   cells.push(unescapeFormulaGuard(cell.trim()));
   return cells;
 }
+
+// CSV completo (RFC 4180): campos entre aspas podem ter separador, aspas
+// duplicadas e QUEBRAS DE LINHA - o export do Google Maps Scraper tem JSON de
+// horarios/avaliacoes assim, que parseCsvLine (linha a linha) quebraria.
+export function parseCsv(text: string, delimiter: CsvDelimiter = ','): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  const source = text.replace(/^﻿/, '');
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (quoted) {
+      if (char === '"' && source[index + 1] === '"') { cell += '"'; index++; }
+      else if (char === '"') quoted = false;
+      else cell += char;
+      continue;
+    }
+    if (char === '"') { quoted = true; continue; }
+    if (char === delimiter) { row.push(cell); cell = ''; continue; }
+    if (char === '\n' || char === '\r') {
+      if (char === '\r' && source[index + 1] === '\n') index++;
+      row.push(cell);
+      if (row.some((value) => value !== '')) rows.push(row);
+      row = [];
+      cell = '';
+      continue;
+    }
+    cell += char;
+  }
+  row.push(cell);
+  if (row.some((value) => value !== '')) rows.push(row);
+  return rows;
+}
+
+// Linhas do CSV como objetos { coluna: valor } usando o cabecalho.
+export function parseCsvRecords(text: string, delimiter: CsvDelimiter = ','): Record<string, string>[] {
+  const [header, ...rows] = parseCsv(text, delimiter);
+  if (!header) return [];
+  const keys = header.map((key) => key.trim().toLowerCase());
+  return rows.map((row) => Object.fromEntries(keys.map((key, index) => [key, (row[index] ?? '').trim()])));
+}

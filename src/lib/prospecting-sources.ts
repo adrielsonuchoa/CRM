@@ -3,6 +3,7 @@ import { db } from '@/db';
 import { activities, leads } from '@/db/schema';
 import { CACHE_TTL, cached } from '@/lib/cache';
 import { detectCsvDelimiter, parseCsvLine } from '@/lib/csv';
+import { extractSocialLinksFromHtml, isSocialOrMessagingUrl, socialLinksFromWebsiteUrl, type SocialLinks } from '@/lib/social-links';
 
 type ProspectingSettings = {
   city: string | null;
@@ -77,36 +78,30 @@ function getGoogleMapsSearchUrl(name: string, address: string | null) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${name}, ${address}`)}`;
 }
 
-function getInstagramUsername(value: string | null | undefined) {
-  if (!value) return null;
+const EMPTY_SOCIAL_LINKS: SocialLinks = { instagram: null, facebook: null, whatsapp: null, emails: [] };
 
-  const raw = String(value).trim();
-  if (!raw) return null;
-
-  const withoutAt = raw.replace(/^@/, '');
-  const withoutBaseUrl = withoutAt
-    .replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '')
-    .replace(/^https?:\/\/(?:www\.)?instagram\.com$/i, '');
-  const username = withoutBaseUrl.split(/[/?#]/)[0].trim();
-  if (!username || ['p', 'reel', 'reels', 'explore', 'accounts', 'direct'].includes(username.toLowerCase())) return null;
-  return /^[a-z0-9._]+$/.test(username) ? username.toLowerCase() : null;
+// Instagram, Facebook, WhatsApp e e-mails publicados no site do negocio.
+// Site que respondeu fica em cache (7 dias); falha de rede nao e cacheada,
+// pra tentar de novo na proxima.
+export async function findSocialLinksOnWebsite(website: string | null | undefined): Promise<SocialLinks> {
+  if (!website) return EMPTY_SOCIAL_LINKS;
+  const fromUrl = socialLinksFromWebsiteUrl(website);
+  // Link da propria rede social: nao ha "site" pra ler (e o Instagram/Facebook
+  // nao entregam o HTML da pagina pra robo).
+  if (isSocialOrMessagingUrl(website)) return { ...EMPTY_SOCIAL_LINKS, ...fromUrl };
+  try {
+    return await cached('website-social', [website], async () => {
+      const response = await fetch(website, { signal: AbortSignal.timeout(5000), headers: { 'user-agent': 'Sirrus CRM public website lookup' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return extractSocialLinksFromHtml(await response.text());
+    }, { ttlSeconds: CACHE_TTL.WEEK });
+  } catch {
+    return EMPTY_SOCIAL_LINKS;
+  }
 }
 
 export async function findInstagramOnWebsite(website: string | null | undefined) {
-  if (!website) return null;
-  try {
-    // Site que respondeu (com ou sem @ no HTML) fica em cache; falha de rede
-    // sobe como erro e nao e cacheada, pra tentar de novo na proxima.
-    return await cached('website-instagram', [website], async () => {
-      const response = await fetch(website, { signal: AbortSignal.timeout(5000), headers: { 'user-agent': 'Sirrus CRM public website lookup' } });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const html = await response.text();
-      const matches = html.match(/https?:\/\/(?:www\.)?instagram\.com\/[A-Za-z0-9._%/-]+/gi) ?? [];
-      return matches.map(getInstagramUsername).find(Boolean) ?? null;
-    }, { ttlSeconds: CACHE_TTL.WEEK });
-  } catch {
-    return null;
-  }
+  return (await findSocialLinksOnWebsite(website)).instagram;
 }
 
 // Indice em memoria pra checar duplicidade sem um SELECT * na tabela
