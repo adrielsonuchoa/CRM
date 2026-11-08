@@ -6,6 +6,7 @@ import { getCurrentUser, userHasPermission } from '@/lib/auth-helpers';
 import { leadVisibilityCondition } from '@/lib/lead-access';
 import { ProspectingQueue } from './prospecting-queue';
 import { ProspectingRunPanel } from './prospecting-run-panel';
+import { GoogleMapsPanel } from './google-maps-panel';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,9 +15,11 @@ export default async function ProspectingPage() {
   if (!currentUser || !userHasPermission(currentUser, 'LEAD_VIEW')) redirect('/');
   let queueLeads = [] as any[];
   let defaultDesiredCount = 10;
+  let defaultCity = 'Maceió';
   try {
-    const s = (await db.select({ dailyQueueSize: settings.dailyQueueSize }).from(settings).limit(1))[0];
+    const s = (await db.select({ dailyQueueSize: settings.dailyQueueSize, city: settings.city }).from(settings).limit(1))[0];
     defaultDesiredCount = s?.dailyQueueSize ?? 10;
+    defaultCity = s?.city?.trim() || defaultCity;
   } catch {
     // Sem settings ainda (banco novo) - mantem o padrao.
   }
@@ -71,7 +74,10 @@ export default async function ProspectingPage() {
         <p className="text-neutral-700 dark:text-neutral-300">Modo Assistido - Analise leads, gere mensagens e aprove os envios.</p>
       </div>
 
-      <ProspectingRunPanel defaultDesiredCount={defaultDesiredCount} />
+      <div className="flex flex-wrap items-center gap-2">
+        <ProspectingRunPanel defaultDesiredCount={defaultDesiredCount} />
+        <GoogleMapsPanel defaultCity={defaultCity} />
+      </div>
 
       <div className="flex-1 overflow-auto">
         <ProspectingQueue initialLeads={queueLeads} />

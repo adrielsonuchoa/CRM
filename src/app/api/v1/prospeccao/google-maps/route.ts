@@ -1,17 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { AuthError, ForbiddenError, requirePermission } from '@/lib/auth-helpers';
-import { logAudit } from '@/lib/audit-log';
-import { CACHE_TTL, cached, getCachedValue, setCachedValue } from '@/lib/cache';
-import {
-  ScraperUnavailableError,
-  createScraperJob,
-  downloadScraperCsv,
-  getScraperJobStatus,
-  importScrapedPlaces,
-  parseScraperCsv,
-  type GoogleMapsSearch,
-} from '@/lib/google-maps-scraper';
+import { ScraperUnavailableError } from '@/lib/google-maps-scraper';
+import { GoogleMapsSearchSchema, checkGoogleMapsSearch, startGoogleMapsSearch } from '@/lib/google-maps-prospecting';
 
 // Prospeccao via Google Maps Scraper (gosom/google-maps-scraper).
 //
@@ -25,16 +15,6 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-const FOOD_NICHE_EXAMPLES = ['restaurante', 'lanchonete', 'bar', 'pizzaria', 'hamburgueria'];
-
-const SearchSchema = z.object({
-  cidade: z.string().trim().min(2, 'Informe a cidade.').max(80),
-  bairro: z.string().trim().max(80).optional().nullable(),
-  nicho: z.string().trim().min(2, `Informe o nicho (ex.: ${FOOD_NICHE_EXAMPLES.join(', ')}).`).max(60),
-  maxTempoSegundos: z.coerce.number().int().min(60).max(1800).optional(),
-  profundidade: z.coerce.number().int().min(1).max(5).optional(),
-});
-
 function errorResponse(error: unknown) {
   if (error instanceof AuthError) return NextResponse.json({ error: error.message }, { status: 401 });
   if (error instanceof ForbiddenError) return NextResponse.json({ error: error.message }, { status: 403 });
@@ -46,24 +26,11 @@ function errorResponse(error: unknown) {
 export async function POST(req: NextRequest) {
   try {
     const user = await requirePermission('AUTOMATION_START');
-    const parsed = SearchSchema.safeParse(await req.json().catch(() => ({})));
+    const parsed = GoogleMapsSearchSchema.safeParse(await req.json().catch(() => ({})));
     if (!parsed.success) {
       return NextResponse.json({ error: parsed.error.issues.map((issue) => issue.message).join(' ') }, { status: 400 });
     }
-    const search: GoogleMapsSearch = parsed.data;
-    const { jobId, keyword } = await createScraperJob(search);
-    // Guarda os parametros pra importacao (o scraper so devolve a palavra-chave).
-    await setCachedValue('gmaps-job', [jobId], { ...search, keyword }, CACHE_TTL.WEEK);
-
-    await logAudit({
-      userId: user.id,
-      userName: user.name,
-      action: 'GOOGLE_MAPS_SEARCH_STARTED',
-      category: 'AUTOMATION',
-      description: `Iniciou busca no Google Maps: "${keyword}".`,
-      metadata: { jobId, keyword },
-    });
-
+    const { jobId, keyword } = await startGoogleMapsSearch(parsed.data, user);
     return NextResponse.json({
       jobId,
       keyword,
@@ -82,37 +49,11 @@ export async function GET(req: NextRequest) {
     if (!jobId || !/^[0-9a-f-]{36}$/i.test(jobId)) {
       return NextResponse.json({ error: 'Informe um jobId válido.' }, { status: 400 });
     }
-
-    const status = await getScraperJobStatus(jobId);
-    if (status === 'pending' || status === 'working' || status === 'unknown') {
-      return NextResponse.json({ jobId, status }, { status: 202 });
+    const check = await checkGoogleMapsSearch(jobId, user);
+    if (check.status === 'failed') {
+      return NextResponse.json({ ...check, error: 'A busca falhou no Google Maps Scraper.' }, { status: 502 });
     }
-    if (status === 'failed') {
-      return NextResponse.json({ jobId, status, error: 'A busca falhou no Google Maps Scraper.' }, { status: 502 });
-    }
-
-    const params = await getCachedValue<GoogleMapsSearch & { keyword: string }>('gmaps-job', [jobId]);
-    // Importacao feita uma vez por job; consultas seguintes devolvem o mesmo
-    // resumo (e reimportar seria seguro mesmo assim - e upsert).
-    const resultado = await cached('gmaps-import', [jobId], async () => {
-      const csv = await downloadScraperCsv(jobId);
-      const places = parseScraperCsv(csv, params ?? undefined);
-      return importScrapedPlaces(places, {
-        nicho: params?.nicho ?? 'Alimentação',
-        keyword: params?.keyword ?? `Google Maps job ${jobId}`,
-      });
-    }, { ttlSeconds: CACHE_TTL.DAY, shouldCache: (value) => value.erros.length === 0 });
-
-    await logAudit({
-      userId: user.id,
-      userName: user.name,
-      action: 'GOOGLE_MAPS_IMPORTED',
-      category: 'LEADS',
-      description: `Importou busca do Google Maps: ${resultado.criados} novo(s), ${resultado.atualizados} atualizado(s).`,
-      metadata: { jobId, criados: resultado.criados, atualizados: resultado.atualizados, ignorados: resultado.ignorados },
-    });
-
-    return NextResponse.json({ jobId, status, resultado });
+    return NextResponse.json(check, { status: check.status === 'ok' ? 200 : 202 });
   } catch (error) {
     return errorResponse(error);
   }

@@ -118,6 +118,10 @@ Integra o [gosom/google-maps-scraper](https://github.com/gosom/google-maps-scrap
 docker run -p 8080:8080 gosom/google-maps-scraper -web -data-folder /gmapsdata
 ```
 
+No Windows sem Docker, use a versao **Linux** pelo WSL: o executavel Windows v1.18.1 tem um bug ([issue #322](https://github.com/gosom/google-maps-scraper/issues/322)) que deixa toda busca vazia ("unexpected page type"). Nesta maquina: `C:ProjetosFerramentasgoogle-maps-scraperIniciar Google Maps Scraper.bat` (o Chromium do scraper usa libnss3/libnspr4/libasound2 extraidas em ~/gmaps/libs, sem precisar de sudo).
+
+Na Fila de Prospeccao, o botao **Google Maps** faz a mesma busca pela tela (cidade, bairro, nicho) e acompanha o progresso.
+
 A busca roda no scraper e leva alguns minutos, por isso a rota tem dois passos (exige login e a permissao de iniciar automacao):
 
 ```text
